@@ -1,6 +1,5 @@
 import numpy as np
 import math
-
 # ---------------------------
 # Problem Dimensions & Parameters
 # ---------------------------
@@ -9,11 +8,11 @@ N = 3   # Number of units
 
 # Global penalty factors (one per constraint)
 penalty_factors = {
-    "unit_transition": 10,
-    "mutual_exclusion": 10,
-    "demand": 10,
-    "ramp_up": 10,
-    "ramp_down": 10
+    "unit_transition": 0,
+    "mutual_exclusion": 0,
+    "demand": 0,
+    "ramp_up": 0,
+    "ramp_down": 0
 }
 
 # Parameter dictionaries
@@ -234,4 +233,6 @@ print("Shape of Q matrix:", Q.shape)
 print("\nConstant term c:")
 print(c_term)
 print("Is the matrix symmetric?", np.allclose(Q, Q.T))
+
+
 
