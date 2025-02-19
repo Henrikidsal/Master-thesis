@@ -1,5 +1,6 @@
 import numpy as np
 import math
+
 # ---------------------------
 # Problem Dimensions & Parameters
 # ---------------------------
@@ -10,7 +11,7 @@ N = 3   # Number of units
 penalty_factors = {
     "unit_transition": 0,
     "mutual_exclusion": 0,
-    "demand": 0,
+    "demand": 1,
     "ramp_up": 0,
     "ramp_down": 0
 }
@@ -28,7 +29,7 @@ R_down = {1:300, 2:150, 3:100}
 # ---------------------------
 # Determine Dynamic Bit-lengths for Slack Variables
 # ---------------------------
-# For the demand constraint at time t: s_t = (sum_i P_max[i]) - D[t]
+# For the demand constraint at time t: slack = (sum_i P_max[i]) - D[t]
 demand_K = {}  # For each time period t, the number of bits needed for the demand slack.
 total_Pmax = sum(P_max.values())
 for t in range(1, T+1):
@@ -36,8 +37,7 @@ for t in range(1, T+1):
     demand_K[t] = int(math.ceil(math.log2(max_slack + 1)))
     print(f"Time {t}: Demand slack max = {max_slack}, bits = {demand_K[t]}")
 
-# For ramp-up: constraint is P_max[i]*(u_{i,t} - u_{i,t-1]) + sUp_{t,i} = R_up[i]
-# Worst-case slack: when u_{i,t} - u_{i,t-1} is most negative, we assume worst-case = R_up[i] + P_max[i].
+# For ramp-up: worst-case slack = R_up[i] + P_max[i] for each unit i, take maximum.
 max_slack_ramp_up = max(R_up[i] + P_max[i] for i in P_max)
 K_ramp_up = int(math.ceil(math.log2(max_slack_ramp_up + 1)))
 print("Ramp-up slack bits (uniform for all units):", K_ramp_up)
@@ -75,22 +75,25 @@ for t in range(1, T+1):
     for i in range(1, N+1):
         add_variable(f"zOff_{i}_{t}")
 
-# 4. Slack variables for demand constraint: s_{t,k} (using dynamic bits per time period)
-for t in range(1, T+1):
-    for k in range(demand_K[t]):
-        add_variable(f"s_{t}_{k}")
+# 4. Slack variables for demand constraint: s_{t,k}
+if penalty_factors["demand"] != 0:
+    for t in range(1, T+1):
+        for k in range(demand_K[t]):
+            add_variable(f"s_{t}_{k}")
 
-# 5. Slack variables for ramp-up constraints: sUp_{t,i,k} (uniform K_ramp_up)
-for t in range(1, T+1):
-    for i in range(1, N+1):
-        for k in range(K_ramp_up):
-            add_variable(f"sUp_{t}_{i}_{k}")
+# 5. Slack variables for ramp-up constraints: sUp_{t,i,k}
+if penalty_factors["ramp_up"] != 0:
+    for t in range(1, T+1):
+        for i in range(1, N+1):
+            for k in range(K_ramp_up):
+                add_variable(f"sUp_{t}_{i}_{k}")
 
-# 6. Slack variables for ramp-down constraints: sDown_{t,i,k} (uniform K_ramp_down)
-for t in range(1, T+1):
-    for i in range(1, N+1):
-        for k in range(K_ramp_down):
-            add_variable(f"sDown_{t}_{i}_{k}")
+# 6. Slack variables for ramp-down constraints: sDown_{t,i,k}
+if penalty_factors["ramp_down"] != 0:
+    for t in range(1, T+1):
+        for i in range(1, N+1):
+            for k in range(K_ramp_down):
+                add_variable(f"sDown_{t}_{i}_{k}")
 
 num_variables = current_index
 print("Total number of variables:", num_variables)
@@ -157,72 +160,77 @@ for t in range(1, T+1):
 # ---------------------------
 # Add Unit Status Transition Constraint
 # For t>=2, for each unit i: u_{i,t} - u_{i,t-1} - zOn_{i,t} + zOff_{i,t} = 0.
-for t in range(2, T+1):
-    for i in range(1, N+1):
-        idx_u_t = variable_mapping[f"u_{i}_{t}"]
-        idx_u_prev = variable_mapping[f"u_{i}_{t-1}"]
-        idx_zOn = variable_mapping[f"zOn_{i}_{t}"]
-        idx_zOff = variable_mapping[f"zOff_{i}_{t}"]
-        terms = [(idx_u_t, 1.0),
-                 (idx_u_prev, -1.0),
-                 (idx_zOn, -1.0),
-                 (idx_zOff, 1.0)]
-        add_penalty_term(terms, 0, penalty_factors["unit_transition"])
+if penalty_factors["unit_transition"] != 0:
+    for t in range(2, T+1):
+        for i in range(1, N+1):
+            idx_u_t = variable_mapping[f"u_{i}_{t}"]
+            idx_u_prev = variable_mapping[f"u_{i}_{t-1}"]
+            idx_zOn = variable_mapping[f"zOn_{i}_{t}"]
+            idx_zOff = variable_mapping[f"zOff_{i}_{t}"]
+            terms = [(idx_u_t, 1.0),
+                     (idx_u_prev, -1.0),
+                     (idx_zOn, -1.0),
+                     (idx_zOff, 1.0)]
+            add_penalty_term(terms, 0, penalty_factors["unit_transition"])
 
 # ---------------------------
 # Add Mutual Exclusion Constraint
 # For each t and i: zOff_{i,t} + zOn_{i,t} ≤ 1 (penalize if both are 1).
-for t in range(1, T+1):
-    for i in range(1, N+1):
-        idx_zOn = variable_mapping[f"zOn_{i}_{t}"]
-        idx_zOff = variable_mapping[f"zOff_{i}_{t}"]
-        add_quadratic_term(idx_zOn, idx_zOff, penalty_factors["mutual_exclusion"])
+if penalty_factors["mutual_exclusion"] != 0:
+    for t in range(1, T+1):
+        for i in range(1, N+1):
+            idx_zOn = variable_mapping[f"zOn_{i}_{t}"]
+            idx_zOff = variable_mapping[f"zOff_{i}_{t}"]
+            add_quadratic_term(idx_zOn, idx_zOff, penalty_factors["mutual_exclusion"])
 
 # ---------------------------
 # Add Demand Satisfaction Constraint
 # For each time t: sum_i P_max[i]*u_{i,t} - (sum_{k=0}^{K_demand[t]-1} 2^k * s_{t,k}) - D[t] = 0.
-for t in range(1, T+1):
-    term_list = []
-    for i in range(1, N+1):
-        idx_u = variable_mapping[f"u_{i}_{t}"]
-        term_list.append((idx_u, P_max[i]))
-    for k in range(demand_K[t]):
-        idx_s = variable_mapping[f"s_{t}_{k}"]
-        term_list.append((idx_s, - (2 ** k)))
-    constant_val = -D[t]
-    add_penalty_term(term_list, constant_val, penalty_factors["demand"])
+if penalty_factors["demand"] != 0:
+    for t in range(1, T+1):
+        term_list = []
+        for i in range(1, N+1):
+            idx_u = variable_mapping[f"u_{i}_{t}"]
+            term_list.append((idx_u, P_max[i]))
+        for k in range(demand_K[t]):
+            idx_s = variable_mapping[f"s_{t}_{k}"]
+            term_list.append((idx_s, - (2 ** k)))
+        constant_val = -D[t]
+        add_penalty_term(term_list, constant_val, penalty_factors["demand"])
 
 # ---------------------------
 # Add Ramp-Up Constraint
 # For each t>=2, for each unit i: P_max[i]*(u_{i,t} - u_{i,t-1]) + (sum_{k=0}^{K_ramp_up-1} 2^k * sUp_{t,i,k}) - R_up[i] = 0.
-for t in range(2, T+1):
-    for i in range(1, N+1):
-        term_list = []
-        idx_u_t = variable_mapping[f"u_{i}_{t}"]
-        idx_u_prev = variable_mapping[f"u_{i}_{t-1}"]
-        term_list.append((idx_u_t, P_max[i]))
-        term_list.append((idx_u_prev, -P_max[i]))
-        for k in range(K_ramp_up):
-            idx_sUp = variable_mapping[f"sUp_{t}_{i}_{k}"]
-            term_list.append((idx_sUp, 2 ** k))
-        constant_val = -R_up[i]
-        add_penalty_term(term_list, constant_val, penalty_factors["ramp_up"])
+if penalty_factors["ramp_up"] != 0:
+    for t in range(2, T+1):
+        for i in range(1, N+1):
+            term_list = []
+            idx_u_t = variable_mapping[f"u_{i}_{t}"]
+            idx_u_prev = variable_mapping[f"u_{i}_{t-1}"]
+            term_list.append((idx_u_t, P_max[i]))
+            term_list.append((idx_u_prev, -P_max[i]))
+            for k in range(K_ramp_up):
+                idx_sUp = variable_mapping[f"sUp_{t}_{i}_{k}"]
+                term_list.append((idx_sUp, 2 ** k))
+            constant_val = -R_up[i]
+            add_penalty_term(term_list, constant_val, penalty_factors["ramp_up"])
 
 # ---------------------------
 # Add Ramp-Down Constraint
 # For each t>=2, for each unit i: P_max[i]*(u_{i,t-1} - u_{i,t]) + (sum_{k=0}^{K_ramp_down-1} 2^k * sDown_{t,i,k}) - R_down[i] = 0.
-for t in range(2, T+1):
-    for i in range(1, N+1):
-        term_list = []
-        idx_u_prev = variable_mapping[f"u_{i}_{t-1}"]
-        idx_u_t = variable_mapping[f"u_{i}_{t}"]
-        term_list.append((idx_u_prev, P_max[i]))
-        term_list.append((idx_u_t, -P_max[i]))
-        for k in range(K_ramp_down):
-            idx_sDown = variable_mapping[f"sDown_{t}_{i}_{k}"]
-            term_list.append((idx_sDown, 2 ** k))
-        constant_val = -R_down[i]
-        add_penalty_term(term_list, constant_val, penalty_factors["ramp_down"])
+if penalty_factors["ramp_down"] != 0:
+    for t in range(2, T+1):
+        for i in range(1, N+1):
+            term_list = []
+            idx_u_prev = variable_mapping[f"u_{i}_{t-1}"]
+            idx_u_t = variable_mapping[f"u_{i}_{t}"]
+            term_list.append((idx_u_prev, P_max[i]))
+            term_list.append((idx_u_t, -P_max[i]))
+            for k in range(K_ramp_down):
+                idx_sDown = variable_mapping[f"sDown_{t}_{i}_{k}"]
+                term_list.append((idx_sDown, 2 ** k))
+            constant_val = -R_down[i]
+            add_penalty_term(term_list, constant_val, penalty_factors["ramp_down"])
 
 # ---------------------------
 # Final Output
@@ -233,6 +241,3 @@ print("Shape of Q matrix:", Q.shape)
 print("\nConstant term c:")
 print(c_term)
 print("Is the matrix symmetric?", np.allclose(Q, Q.T))
-
-
-
