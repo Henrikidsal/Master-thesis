@@ -1,19 +1,20 @@
 import numpy as np
 import math
+import gurobipy as gp
+from gurobipy import GRB
 
-# ---------------------------
-# Problem Dimensions & Parameters
-# ---------------------------
+''''''''''''' The code changes the problem from "summation QUBO" into standard QUBO form '''''''''''''
+
 T = 3   # Number of time periods
 N = 3   # Number of units
 
 # Global penalty factors (one per constraint)
 penalty_factors = {
-    "unit_transition": 0,
-    "mutual_exclusion": 0,
-    "demand": 1,
-    "ramp_up": 0,
-    "ramp_down": 0
+    "unit_transition": 0.5,
+    "mutual_exclusion": 5,
+    "demand": 0.5,
+    "ramp_up": 0.5,
+    "ramp_down": 0.5
 }
 
 # Parameter dictionaries
@@ -241,3 +242,46 @@ print("Shape of Q matrix:", Q.shape)
 print("\nConstant term c:")
 print(c_term)
 print("Is the matrix symmetric?", np.allclose(Q, Q.T))
+
+
+''''''''''''' Solving the QUBO '''''''''''''
+def solve_qubo(Q, c):
+
+    n = Q.shape[0]
+    
+    # Create a new Gurobi model
+    m = gp.Model("qubo")
+    m.setParam('OutputFlag', 0)  # turn off solver output
+    
+    # Add binary variables x[i] for i in range(n)
+    x = m.addVars(n, vtype=GRB.BINARY, name="x")
+    
+    # Build the quadratic objective expression: x^T Q x + c
+    obj = gp.QuadExpr()
+    for i in range(n):
+        for j in range(n):
+            # Only add nonzero coefficients for efficiency
+            if Q[i, j] != 0:
+                # Note: For off-diagonal terms, Q is assumed to be fully populated;
+                # we add them all. Gurobi will combine terms appropriately.
+                obj.add(Q[i, j] * x[i] * x[j])
+    
+    obj.add(c)  # add the constant term
+    m.setObjective(obj, GRB.MINIMIZE)
+    
+    # Optimize the model
+    m.optimize()
+    
+    # Retrieve the solution
+    sol = np.array([x[i].X for i in range(n)])
+    obj_val = m.objVal
+    
+    return sol, obj_val
+
+if __name__ == "__main__":
+    
+    solution, obj_val = solve_qubo(Q, c_term)
+    print("Optimal binary solution x:")
+    print(solution)
+    print("Optimal objective value:")
+    print(obj_val)
