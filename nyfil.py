@@ -299,7 +299,7 @@ def objective(trial):
 # ---------------------------
 if __name__ == "__main__":
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=25)  # Adjust n_trials as needed
+    study.optimize(objective, n_trials=500)  # Adjust n_trials as needed
     
     print("Best penalty parameters found:")
     print(study.best_params)
