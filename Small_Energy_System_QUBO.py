@@ -5,7 +5,7 @@ from gurobipy import GRB
 
 ''''''''''''' The code changes the problem from "summation QUBO" into standard QUBO form '''''''''''''
 
-T = 48   # Number of time periods
+T = 10   # Number of time periods
 N = 3   # Number of units
 
 # Global penalty factors (one per constraint)
@@ -20,11 +20,7 @@ penalty_factors = {
 # Parameter dictionaries
 P_max = {1:350, 2:200, 3:140}
 D = {1: 160, 2: 500, 3: 400, 4: 200, 5: 300, 6: 250, 7: 400, 8: 300,
-     9: 200, 10: 180, 11: 170, 12: 400, 13: 500, 14: 300, 15: 200, 16: 250,
-     17: 300, 18: 400, 19: 500, 20: 200, 21: 150, 22: 190, 23: 200, 24: 300,
-     25: 400, 26: 500, 27: 400, 28: 300, 29: 200, 30: 160, 31: 180, 32: 200,
-     33: 300, 34: 400, 35: 500, 36: 400, 37: 300, 38: 200, 39: 160, 40: 160,
-     41: 200, 42: 300, 43: 400, 44: 500, 45: 400, 46: 300, 47: 200, 48: 160}
+     9: 200, 10: 180}
 C_startup = {1:20, 2:18, 3:5}
 C_shutdown = {1:0.5, 2:0.3, 3:1.0}
 b_cost = {1:0.1, 2:0.125, 3:0.15}
