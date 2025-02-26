@@ -10,11 +10,11 @@ N = 3   # Number of units
 
 # Global penalty factors (one per constraint)
 penalty_factors = {
-    "unit_transition": 0.5,
-    "mutual_exclusion": 0.5,
-    "demand": 0.5,
-    "ramp_up": 0.5,
-    "ramp_down": 0.5
+    "unit_transition": 5,
+    "mutual_exclusion": 5,
+    "demand": 5,
+    "ramp_up": 5,
+    "ramp_down": 5
 }
 
 # Parameter dictionaries
