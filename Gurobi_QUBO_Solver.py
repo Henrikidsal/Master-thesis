@@ -1,8 +1,8 @@
 import gurobipy as gp
 from gurobipy import GRB
 import numpy as np
-from Small_Energy_System_QUBO import Q as Qubo
-from Small_Energy_System_QUBO import c_term as constant_term
+from Small_problem_solver import Q as Qubo
+from Small_problem_solver import c_term as constant_term
 
 def solve_qubo(Q, c):
 
