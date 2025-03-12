@@ -4,10 +4,7 @@ import gurobipy as gp
 from gurobipy import GRB
 import optuna
 
-# ---------------------------
-# Global Parameters
-# ---------------------------
-T = 3   # Number of time periods
+T = 3  # Number of time periods
 N = 3   # Number of units
 
 # Parameter dictionaries
@@ -20,11 +17,8 @@ c_cost = {1: 5, 2: 7, 3: 6}
 R_up = {1: 200, 2: 100, 3: 100}
 R_down = {1: 300, 2: 150, 3: 100}
 
-# ---------------------------
-# Function to Build the QUBO
-# ---------------------------
+
 def build_qubo(penalty_factors):
-    # --- Determine Dynamic Bit-lengths for Slack Variables ---
     # For the demand constraint at time t: slack = (sum_i P_max[i]) - D[t]
     demand_K = {}
     total_Pmax = sum(P_max.values())
@@ -196,13 +190,11 @@ def build_qubo(penalty_factors):
     
     return Q, c_term, variable_mapping, demand_K, K_ramp_up, K_ramp_down
 
-# ---------------------------
-# Function to Solve the QUBO using Gurobi
-# ---------------------------
+
 def solve_qubo(Q, c):
     n = Q.shape[0]
     m = gp.Model("qubo")
-    m.setParam('OutputFlag', 0)  # Turn off solver output
+    m.setParam('OutputFlag', 0) 
     x = m.addVars(n, vtype=GRB.BINARY, name="x")
     
     obj = gp.QuadExpr()
@@ -218,9 +210,6 @@ def solve_qubo(Q, c):
     obj_val = m.objVal
     return solution, obj_val
 
-# ---------------------------
-# Function to Check Constraint Violations
-# ---------------------------
 def check_constraints(solution, variable_mapping, demand_K, K_ramp_up, K_ramp_down, tol=1e-6):
     total_violation = 0.0
     # 1. Unit Status Transition: u_{i,t} - u_{i,t-1} - zOn_{i,t} + zOff_{i,t} = 0 for t>=2.
@@ -231,6 +220,7 @@ def check_constraints(solution, variable_mapping, demand_K, K_ramp_up, K_ramp_do
                    solution[variable_mapping[f"zOn_{i}_{t}"]] +
                    solution[variable_mapping[f"zOff_{i}_{t}"]])
             total_violation += abs(lhs)
+    
     # 2. Mutual Exclusion: zOn_{i,t} + zOff_{i,t} ≤ 1.
     for t in range(1, T+1):
         for i in range(1, N+1):
@@ -262,11 +252,9 @@ def check_constraints(solution, variable_mapping, demand_K, K_ramp_up, K_ramp_do
             total_violation += abs(lhs - R_down[i])
     return total_violation
 
-# ---------------------------
-# Optuna Objective Function
-# ---------------------------
+
 def objective(trial):
-    # Suggest penalty parameters on a log scale (adjust ranges if needed)
+
     unit_transition = trial.suggest_float("unit_transition", 0, 5)
     mutual_exclusion = trial.suggest_float("mutual_exclusion", 0, 5)
     demand = trial.suggest_float("demand", 0, 5)
@@ -291,15 +279,13 @@ def objective(trial):
     if total_violation > 1e-6:
         # Infeasible solution: return a large penalty
         return 1e6 + total_violation
-    # If feasible, the objective is the sum of penalty parameters (we want these as low as possible)
+    # If feasible, the objective is the sum of penalty parameters (want these as low as possible)
     return unit_transition + mutual_exclusion + demand + ramp_up + ramp_down
 
-# ---------------------------
-# Main: Run Optuna Study and Solve Final QUBO
-# ---------------------------
+# Running optuna to find the best penalty parameters
 if __name__ == "__main__":
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=500)  # Adjust n_trials as needed
+    study.optimize(objective, n_trials=10) 
     
     print("Best penalty parameters found:")
     print(study.best_params)

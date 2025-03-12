@@ -5,27 +5,27 @@ from gurobipy import GRB
 
 ''''''''''''' The code changes the problem from "summation QUBO" into standard QUBO form '''''''''''''
 
-T = 4  # Number of time periods
+T = 3  # Number of time periods
 N = 3   # Number of units
 
 # Global penalty factors (one per constraint)
 penalty_factors = {
-    "unit_transition": 5,
-    "mutual_exclusion": 5,
-    "demand": 5,
-    "ramp_up": 5,
-    "ramp_down": 5
+    "unit_transition": 50,
+    "mutual_exclusion": 50,
+    "demand": 50,
+    "ramp_up": 50,
+    "ramp_down": 50
 }
 
 # Parameter dictionaries
 P_max = {1:350, 2:200, 3:140}
-D = {1: 160, 2: 500, 3: 300, 4: 200}
+D = {1: 160, 2: 500, 3: 400}
 C_startup = {1:20, 2:18, 3:5}
 C_shutdown = {1:0.5, 2:0.3, 3:1.0}
 b_cost = {1:0.1, 2:0.125, 3:0.15}
 c_cost = {1:5, 2:7, 3:6}
-R_up = {1:200, 2:100, 3:100}
-R_down = {1:300, 2:150, 3:100}
+R_up = {1:350, 2:200, 3:140}
+R_down = {1:350, 2:200, 3:140}
 
 # ---------------------------
 # Determine Dynamic Bit-lengths for Slack Variables
@@ -132,12 +132,6 @@ def add_constant_term(value):
     c_term += value
 
 def add_penalty_term(term_list, constant_term, weight):
-    """
-    Given a list of terms (index, coefficient) and a constant,
-    add the penalty weight * (sum_j (coeff_j * x_j) + constant)^2.
-    This expands to:
-      weight * [sum_{j,l} (coeff_j*coeff_l * x_j*x_l) + 2*constant*sum_j (coeff_j*x_j) + constant^2]
-    """
     for idx1, coeff1 in term_list:
         for idx2, coeff2 in term_list:
             add_quadratic_term(idx1, idx2, weight * coeff1 * coeff2)
@@ -176,7 +170,6 @@ if penalty_factors["unit_transition"] != 0:
 
 # ---------------------------
 # Add Mutual Exclusion Constraint
-# For each t and i: zOff_{i,t} + zOn_{i,t} ≤ 1 (penalize if both are 1).
 if penalty_factors["mutual_exclusion"] != 0:
     for t in range(1, T+1):
         for i in range(1, N+1):
@@ -186,7 +179,6 @@ if penalty_factors["mutual_exclusion"] != 0:
 
 # ---------------------------
 # Add Demand Satisfaction Constraint
-# For each time t: sum_i P_max[i]*u_{i,t} - (sum_{k=0}^{K_demand[t]-1} 2^k * s_{t,k}) - D[t] = 0.
 if penalty_factors["demand"] != 0:
     for t in range(1, T+1):
         term_list = []
@@ -201,7 +193,6 @@ if penalty_factors["demand"] != 0:
 
 # ---------------------------
 # Add Ramp-Up Constraint
-# For each t>=2, for each unit i: P_max[i]*(u_{i,t} - u_{i,t-1]) + (sum_{k=0}^{K_ramp_up-1} 2^k * sUp_{t,i,k}) - R_up[i] = 0.
 if penalty_factors["ramp_up"] != 0:
     for t in range(2, T+1):
         for i in range(1, N+1):
@@ -218,7 +209,6 @@ if penalty_factors["ramp_up"] != 0:
 
 # ---------------------------
 # Add Ramp-Down Constraint
-# For each t>=2, for each unit i: P_max[i]*(u_{i,t-1} - u_{i,t]) + (sum_{k=0}^{K_ramp_down-1} 2^k * sDown_{t,i,k}) - R_down[i] = 0.
 if penalty_factors["ramp_down"] != 0:
     for t in range(2, T+1):
         for i in range(1, N+1):
@@ -235,7 +225,6 @@ if penalty_factors["ramp_down"] != 0:
 
 # ---------------------------
 # Final Output
-# ---------------------------
 print("Final Q matrix (dense format):")
 print(Q)
 print("Shape of Q matrix:", Q.shape)
@@ -251,8 +240,8 @@ def solve_qubo(Q, c):
     
     # Create a new Gurobi model
     m = gp.Model("qubo")
-    m.setParam('MIPGap', 0.1)
-    m.setParam('OutputFlag', 1)  # turn off solver output
+    #m.setParam('MIPGap', 0.1)
+    m.setParam('OutputFlag', 0)  # turn off solver output
     
     # Add binary variables x[i] for i in range(n)
     x = m.addVars(n, vtype=GRB.BINARY, name="x")
@@ -286,3 +275,9 @@ if __name__ == "__main__":
     print(solution)
     print("Optimal objective value:")
     print(obj_val)
+    #printing the u values
+    print("Unit status values:")
+    for t in range(1, T+1):
+        for i in range(1, N+1):
+            idx = variable_mapping[f"u_{i}_{t}"]
+            print(f"u_{i}_{t} = {solution[idx]}")
