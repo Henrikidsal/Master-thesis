@@ -23,7 +23,7 @@ gen_data = {
 
 # Demand and Reserve Parameters
 demand = {1: 160, 2: 500, 3: 400}
-reserve = {1: 16, 2: 50, 3: 40}
+
 
 # Initial Conditions for T = 0 
 # u_it: ON/OFF status
@@ -32,13 +32,10 @@ u_initial = {1: 0, 2: 0, 3: 1}
 p_initial = {1: 0, 2: 0, 3: 100}
 
 # Large Penalty for slack variables, in sub problem
-M_penalty = 1e6
+M_penalty = 1e5
 
 # Number of bits for beta variable
-num_beta_bits = 9
-
-# Number of slack bits for the benders cuts 
-num_slack_bits = 9
+num_beta_bits = 35
 
 # Function creating the sub problem
 def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
@@ -133,121 +130,92 @@ def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
     return model
 
 # Function creating the master problem
+# Function creating the master problem
 def build_master(iteration_data):
-    model = pyo.ConcreteModel(name="UCP_MasterProblem") # Just creates an empty model
+    model = pyo.ConcreteModel(name="UCP_MasterProblem_QUBO_Constrained") # Use descriptive name
 
     # Sets
-    model.I = pyo.Set(initialize=generators) # Creates the generators set
-    model.T = pyo.Set(initialize=time_periods) # Creates the time periods set
-    model.T0 = pyo.Set(initialize=time_periods_with_0) # Creates a set for the time periods, but also includes t=0
-    model.BETA_BITS = pyo.RangeSet(0, num_beta_bits - 1) # Set for indexing binary beta variables
+    model.I = pyo.Set(initialize=generators)
+    model.T = pyo.Set(initialize=time_periods)
+    model.T0 = pyo.Set(initialize=time_periods_with_0)
+    model.BETA_BITS = pyo.RangeSet(0, num_beta_bits - 1)
+    model.Cuts = pyo.Set(initialize=range(len(iteration_data)))
 
-    # Paramters
+    # Paramters (penalty values, etc.)
     model.Pmax = pyo.Param(model.I, initialize={i: gen_data[i]['Pmax'] for i in model.I})
     model.Cf = pyo.Param(model.I, initialize={i: gen_data[i]['Cf'] for i in model.I})
     model.Csu = pyo.Param(model.I, initialize={i: gen_data[i]['Csu'] for i in model.I})
     model.Csd = pyo.Param(model.I, initialize={i: gen_data[i]['Csd'] for i in model.I})
     model.D = pyo.Param(model.T, initialize=demand)
-    model.R = pyo.Param(model.T, initialize=reserve)
     model.u_init = pyo.Param(model.I, initialize=u_initial)
-    model.lambda_logic1 = pyo.Param(initialize=20) # Penalty for logic1 constraint #20
-    model.lambda_logic2 = pyo.Param(initialize=20) # Penalty for logic2 constraint #12
-    model.lambda_benderscuts = pyo.Param(initialize=1e2) # Penalty for Benders cuts
+    model.lambda_logic1 = pyo.Param(initialize=300) 
+    model.lambda_logic2 = pyo.Param(initialize=300)
+    model.lambda_benders = pyo.Param(initialize=1000) # Penalty for violating Benders cuts
 
-    # Parameters needed for constructing Benders cuts (coefficients)
+    # Parameters for Benders cut coefficients
     model.Pmin = pyo.Param(model.I, initialize={i: gen_data[i]['Pmin'] for i in model.I})
     model.Rd = pyo.Param(model.I, initialize={i: gen_data[i]['Rd'] for i in model.I})
     model.Rsd = pyo.Param(model.I, initialize={i: gen_data[i]['Rsd'] for i in model.I})
     model.Ru = pyo.Param(model.I, initialize={i: gen_data[i]['Ru'] for i in model.I})
     model.Rsu = pyo.Param(model.I, initialize={i: gen_data[i]['Rsu'] for i in model.I})
 
-    # Variables 
+    # Variables
     model.u = pyo.Var(model.I, model.T, within=pyo.Binary)
     model.zON = pyo.Var(model.I, model.T, within=pyo.Binary)
     model.zOFF = pyo.Var(model.I, model.T, within=pyo.Binary)
-    model.beta_binary = pyo.Var(model.BETA_BITS, within=pyo.Binary) # Beta in binary bits
+    model.beta_binary = pyo.Var(model.BETA_BITS, within=pyo.Binary)
 
-    # Just a clever helping function that always gives the correct u value for the previous time period, even if t=1
+    # Expression for u_prev
     def u_prev_rule(m, i, t):
-        if t == 1:
-            return m.u_init[i]
-        else:
-            return m.u[i, t-1]
+        if t == 1: return m.u_init[i]
+        else: return m.u[i, t-1]
     model.u_prev = pyo.Expression(model.I, model.T, rule=u_prev_rule)
 
-    # Objective function for master problem
+    # Objective function
     def master_objective_rule(m):
-
-        commitment_cost = sum(m.Csu[i] * m.zON[i, t] + m.Csd[i] * m.zOFF[i, t] + m.Cf[i] * m.u[i, t]
-                              for i in m.I for t in m.T) #Original objective function
-        
-        logic1_term = m.lambda_logic1 * sum(
-            ( (m.u[i, t] - m.u_prev[i, t]) - (m.zON[i, t] - m.zOFF[i, t]) )**2 for i in m.I for t in m.T
-        ) # The penalty term for the logic1 constraint.
-
-        logic2_term = m.lambda_logic2 * sum(
-            m.zON[i, t] * m.zOFF[i, t] for i in m.I for t in m.T
-        ) # The penalty term for the logic2 constraint.
-
-        # Binary expansion of beta
+        commitment_cost = sum(m.Csu[i] * m.zON[i, t] + m.Csd[i] * m.zOFF[i, t] + m.Cf[i] * m.u[i, t] for i in m.I for t in m.T)
+        logic1_term = m.lambda_logic1 * sum( ( (m.u[i, t] - m.u_prev[i, t]) - (m.zON[i, t] - m.zOFF[i, t]) )**2 for i in m.I for t in m.T )
+        logic2_term = m.lambda_logic2 * sum( m.zON[i, t] * m.zOFF[i, t] for i in m.I for t in m.T )
         binary_beta_expr = sum( (2**j) * m.beta_binary[j] for j in m.BETA_BITS )
-        
         return commitment_cost + logic1_term + logic2_term + binary_beta_expr
     model.OBJ = pyo.Objective(rule=master_objective_rule, sense=pyo.minimize)
 
-    # Benders Cuts
-    model.Cuts = pyo.Set(initialize=range(len(iteration_data))) # this just creates a set of the length of the iterations. it serves as the index for the Benders cut constraints.
-
-    def benders_cut_rule(m, k): # Creates the Benders cut (β≥θ_j+Φ_j^T (x-x_j)) for each iteration, and add it to the set containing benders cuts.
+    # Benders Cuts Constraints
+    def benders_cut_rule(m, k):
+        # (Rule remains the same)
         data = iteration_data[k]
         sub_obj_k = data['sub_obj']
         duals_k = data['duals']
         u_k = data['u_vals']
         zON_k = data['zON_vals']
         zOFF_k = data['zOFF_vals']
-
         cut_expr = sub_obj_k
-
-        # Duals for MinPower: p >= p_min * u
-        for i in m.I:
+        for i in m.I: # MinPower
             for t in m.T:
                 dual_val = duals_k['lambda_min'].get((i, t), 0.0)
-                cut_expr += dual_val * (m.Pmin[i] * (m.u[i, t] - u_k.get((i,t), 0.0))) # Use get on u_k dict
-
-        # Duals for MaxPower: p <= p_max * u
-        for i in m.I:
+                cut_expr += dual_val * (m.Pmin[i] * (m.u[i, t] - u_k.get((i,t), 0.0)))
+        for i in m.I: # MaxPower
             for t in m.T:
                 dual_val = duals_k['lambda_max'].get((i, t), 0.0)
-                cut_expr += dual_val * (m.Pmax[i] * (m.u[i, t] - u_k.get((i,t), 0.0))) # Use get on u_k dict
-
-        # Duals for RampUp: p(t) - p(t-1) <= Ru * u(t-1) + Rsu * zON(t)
-        for i in m.I:
+                cut_expr += dual_val * (m.Pmax[i] * (m.u[i, t] - u_k.get((i,t), 0.0)))
+        for i in m.I: # RampUp
             for t in m.T:
                 dual_val = duals_k['lambda_ru'].get((i, t), 0.0)
-
                 u_prev_term = 0
                 u_prev_k = u_k.get((i, t-1), m.u_init[i]) if t > 1 else m.u_init[i]
-                if t > 1:
-                    u_prev_term = m.Ru[i] * (m.u[i, t-1] - u_prev_k)
-
+                if t > 1: u_prev_term = m.Ru[i] * (m.u[i, t-1] - u_prev_k)
                 zON_term = m.Rsu[i] * (m.zON[i, t] - zON_k.get((i, t), 0.0))
-
                 cut_expr += dual_val * (u_prev_term + zON_term)
-
-        # Duals for RampDown: p(t-1) - p(t) <= Rd * u(t) + Rsd * zOFF(t)
-        for i in m.I:
+        for i in m.I: # RampDown
             for t in m.T:
                 dual_val = duals_k['lambda_rd'].get((i, t), 0.0)
                 u_term = m.Rd[i] * (m.u[i, t] - u_k.get((i, t), 0.0))
                 zOFF_term = m.Rsd[i] * (m.zOFF[i, t] - zOFF_k.get((i, t), 0.0))
-
                 cut_expr += dual_val * (u_term + zOFF_term)
-        # Binary expansion of beta on the LHS
         binary_beta_expr = sum( (2**j) * m.beta_binary[j] for j in m.BETA_BITS )
-
         return binary_beta_expr >= cut_expr
 
-    model.BendersCuts = pyo.Constraint(model.Cuts, rule=benders_cut_rule)
+    model.BendersCuts = pyo.Constraint(model.Cuts, rule=benders_cut_rule) # Uses the first definition of model.Cuts
 
     return model
 
@@ -256,11 +224,10 @@ def build_master(iteration_data):
 def main():
     start_time = time.time()
     max_iter = 30 # Maximum number of iterations for Benders loop
-    epsilon = 1e-4 # Convergence tolerance for gap
+    epsilon = 1 # Convergence tolerance for gap
     iteration_data = []
     lower_bound = -float('inf')
     upper_bound = float('inf')
-    error = float('inf')
 
     # Initialize master variables for first subproblem solve
     # Basically, this just says that all generators are ON at t=1 for the first guess in iter 1.
@@ -364,7 +331,7 @@ def main():
         print(f"Current Lower Bound (Z_LB): {lower_bound:.4f}")
         print(f"Current Upper Bound (Z_UB): {upper_bound:.4f}")
         if upper_bound < float('inf') and lower_bound > -float('inf'):
-             gap = (upper_bound - lower_bound) / (abs(upper_bound) + 1e-9)
+             gap = (upper_bound - lower_bound) 
              print(f"Current Gap: {gap:.6f} (Tolerance: {epsilon})")
              if gap <= epsilon:
                  print("\nConvergence tolerance met.")
@@ -385,7 +352,7 @@ def main():
         # Checks status
         if master_results.solver.termination_condition == TerminationCondition.optimal:
             master_obj_val = pyo.value(master_problem.OBJ)
-            lower_bound = master_obj_val
+            lower_bound = master_obj_val-1
             print(f"Master Status: Optimal")
             print(f"Master Objective (Commitment Cost + Beta): {master_obj_val:.4f}")
             print(f"Updated Lower Bound (Z_LB): {lower_bound:.4f}")
