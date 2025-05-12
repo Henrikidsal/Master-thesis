@@ -374,7 +374,7 @@ def main():
         # Solving the master Problem
         print("\n--- Solving Master Problem ---")
         master_problem = build_master(iteration_data)
-        master_results = master_solver.solve(master_problem, tee=False)
+        master_results = master_solver.solve(master_problem, tee=True)
 
         # Checks status
         if master_results.solver.termination_condition == TerminationCondition.optimal:

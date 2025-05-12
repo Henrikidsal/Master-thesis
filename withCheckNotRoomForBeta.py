@@ -32,10 +32,10 @@ u_initial = {1: 0, 2: 0, 3: 1}
 p_initial = {1: 0, 2: 0, 3: 100}
 
 # Large Penalty for slack variables, in sub problem
-M_penalty = 2e2
+M_penalty = 4e2
 
 # Number of bits for beta variable
-num_beta_bits = 9
+#num_beta_bits = 21
 
 # Function creating the sub problem
 def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
@@ -56,7 +56,7 @@ def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
     model.zON_fixed = pyo.Param(model.I, model.T, initialize=zON_fixed_param_vals, mutable=True)
     model.zOFF_fixed = pyo.Param(model.I, model.T, initialize=zOFF_fixed_param_vals, mutable=True)
 
-    # --- Parameters ---
+    # Parameters
     model.Pmin = pyo.Param(model.I, initialize={i: gen_data[i]['Pmin'] for i in model.I})
     model.Pmax = pyo.Param(model.I, initialize={i: gen_data[i]['Pmax'] for i in model.I})
     model.Rd = pyo.Param(model.I, initialize={i: gen_data[i]['Rd'] for i in model.I})
@@ -69,18 +69,16 @@ def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
     model.p_init = pyo.Param(model.I, initialize=p_initial)
     model.M = pyo.Param(initialize=M_penalty)
 
-    # --- Variables ---
+    # Variabls
     model.p = pyo.Var(model.I, model.T, within=pyo.NonNegativeReals)
     model.demand_slack = pyo.Var(model.T, within=pyo.NonNegativeReals)
 
-    # --- Objective Function ---
+    # objective Functio
     def objective_rule(m):
         variable_cost = sum(m.Cv[i] * m.p[i, t] for i in m.I for t in m.T)
         penalty_cost = m.M * sum(m.demand_slack[t] for t in m.T)
         return variable_cost + penalty_cost
     model.OBJ = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
-
-    # --- Constraints ---
 
     # A smart placeholder that always gives the correct power output for the previous time period, even if t=1
     def p_prev_rule(m, i, t):
@@ -97,7 +95,6 @@ def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
          else:
              return m.u_fixed[i, t-1]
     model.u_prev_fixed = pyo.Expression(model.I, model.T, rule=u_prev_fixed_rule)
-
 
     # Constraint: Minimum power output
     def min_power_rule(m, i, t):
@@ -124,10 +121,80 @@ def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
         return sum(m.p[i, t] for i in m.I) + m.demand_slack[t] >= m.D[t]
     model.Demand = pyo.Constraint(model.T, rule=demand_rule)
 
-    # --- Dual Suffix ---
+    # Collecting dual variables for Benders cuts
     model.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
 
     return model
+
+def _calculate_cut_expr_for_master(model, cut_data):
+    sub_obj_k = cut_data['sub_obj']
+    duals_k = cut_data['duals']
+    u_k = cut_data['u_vals']
+    zON_k = cut_data['zON_vals']
+    zOFF_k = cut_data['zOFF_vals']
+
+    # Initialize terms
+    constant_term = sub_obj_k # Start with subproblem obj (includes var cost + sub penalty)
+    variable_expr = 0.0
+
+    for i in model.I:
+        for t in model.T:
+            dual_val = duals_k['lambda_min'].get((i, t), 0.0)
+            if abs(dual_val) > 1e-9:
+                term = -dual_val * model.Pmin[i] # df/du = -Pmin
+                variable_expr += term * model.u[i, t]
+                constant_term -= term * u_k.get((i, t), 0.0) # Subtract lambda*df/du*u_k
+
+    # Max Power: Pmax*u - p >= 0. Dual lambda_max >= 0. Term: lambda_max * (Pmax * (u - u_k))
+    for i in model.I:
+        for t in model.T:
+            dual_val = duals_k['lambda_max'].get((i, t), 0.0)
+            if abs(dual_val) > 1e-9:
+                term = dual_val * model.Pmax[i] # df/du = Pmax
+                variable_expr += term * model.u[i, t]
+                constant_term -= term * u_k.get((i, t), 0.0)
+
+    # Ramp Up: (Ru*u_prev + Rsu*zON) - p + p_prev >= 0. Dual lambda_ru >= 0.
+    # Term: lambda_ru * (Ru*(u_prev - u_prev_k) + Rsu*(zON - zON_k))
+    for i in model.I:
+        for t in model.T:
+            dual_val = duals_k['lambda_ru'].get((i, t), 0.0)
+            if abs(dual_val) > 1e-9:
+                # u_prev term (df/du_prev = Ru)
+                term_u_prev = dual_val * model.Ru[i]
+                u_prev_var = model.u_prev[i, t] # Master variable u[i, t-1] or u_init[i]
+                u_prev_k = u_k.get((i, t - 1), model.u_init[i]) if t > 1 else model.u_init[i]
+                variable_expr += term_u_prev * u_prev_var
+                constant_term -= term_u_prev * u_prev_k
+
+                # zON term (df/dzON = Rsu)
+                term_zON = dual_val * model.Rsu[i]
+                zON_var = model.zON[i, t]
+                zON_val_k = zON_k.get((i, t), 0.0)
+                variable_expr += term_zON * zON_var
+                constant_term -= term_zON * zON_val_k
+
+    # Ramp Down: (Rd*u + Rsd*zOFF) - p_prev + p >= 0. Dual lambda_rd >= 0.
+    # Term: lambda_rd * (Rd*(u - u_k) + Rsd*(zOFF - zOFF_k))
+    for i in model.I:
+        for t in model.T:
+            dual_val = duals_k['lambda_rd'].get((i, t), 0.0)
+            if abs(dual_val) > 1e-9:
+                # u term (df/du = Rd)
+                term_u = dual_val * model.Rd[i]
+                u_var = model.u[i,t]
+                u_val_k = u_k.get((i, t), 0.0)
+                variable_expr += term_u * u_var
+                constant_term -= term_u * u_val_k
+
+                # zOFF term (df/dzOFF = Rsd)
+                term_zOFF = dual_val * model.Rsd[i]
+                zOFF_var = model.zOFF[i, t]
+                zOFF_val_k = zOFF_k.get((i, t), 0.0)
+                variable_expr += term_zOFF * zOFF_var
+                constant_term -= term_zOFF * zOFF_val_k
+
+    return constant_term + variable_expr
 
 # Function creating the master problem
 def build_master(iteration_data):
@@ -137,31 +204,33 @@ def build_master(iteration_data):
     model.I = pyo.Set(initialize=generators)
     model.T = pyo.Set(initialize=time_periods)
     model.T0 = pyo.Set(initialize=time_periods_with_0)
-    model.BETA_BITS = pyo.RangeSet(0, num_beta_bits - 1)
+    #model.BETA_BITS = pyo.RangeSet(0, num_beta_bits - 1)
     model.Cuts = pyo.Set(initialize=range(len(iteration_data)))
 
-    # Paramters (penalty values, etc.)
+    # Paramters 
     model.Pmax = pyo.Param(model.I, initialize={i: gen_data[i]['Pmax'] for i in model.I})
     model.Cf = pyo.Param(model.I, initialize={i: gen_data[i]['Cf'] for i in model.I})
     model.Csu = pyo.Param(model.I, initialize={i: gen_data[i]['Csu'] for i in model.I})
     model.Csd = pyo.Param(model.I, initialize={i: gen_data[i]['Csd'] for i in model.I})
     model.D = pyo.Param(model.T, initialize=demand)
     model.u_init = pyo.Param(model.I, initialize=u_initial)
-    model.lambda_logic1 = pyo.Param(initialize=20) 
-    model.lambda_logic2 = pyo.Param(initialize=20)
-
-    # Parameters for Benders cut coefficients
     model.Pmin = pyo.Param(model.I, initialize={i: gen_data[i]['Pmin'] for i in model.I})
     model.Rd = pyo.Param(model.I, initialize={i: gen_data[i]['Rd'] for i in model.I})
     model.Rsd = pyo.Param(model.I, initialize={i: gen_data[i]['Rsd'] for i in model.I})
     model.Ru = pyo.Param(model.I, initialize={i: gen_data[i]['Ru'] for i in model.I})
     model.Rsu = pyo.Param(model.I, initialize={i: gen_data[i]['Rsu'] for i in model.I})
+    model.lambda_logic1 = pyo.Param(initialize=30) 
+    model.lambda_logic2 = pyo.Param(initialize=30)
+    lamda_Ben = 300
+    model.lambda_benders = pyo.Param(initialize=lamda_Ben)
 
     # Variables
     model.u = pyo.Var(model.I, model.T, within=pyo.Binary)
     model.zON = pyo.Var(model.I, model.T, within=pyo.Binary)
     model.zOFF = pyo.Var(model.I, model.T, within=pyo.Binary)
-    model.beta_binary = pyo.Var(model.BETA_BITS, within=pyo.Binary)
+    #model.beta_binary = pyo.Var(model.BETA_BITS, within=pyo.Binary)
+    model.s_continuous = pyo.Var(model.Cuts, within=pyo.NonNegativeReals, bounds=(1/(2*lamda_Ben), None))
+    model.beta = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 1e7)) # Continuous variable for beta
 
     # Expression for u_prev
     def u_prev_rule(m, i, t):
@@ -171,52 +240,197 @@ def build_master(iteration_data):
 
     # Objective function
     def master_objective_rule(m):
+
+        BETA = m.beta
+
         commitment_cost = sum(m.Csu[i] * m.zON[i, t] + m.Csd[i] * m.zOFF[i, t] + m.Cf[i] * m.u[i, t] for i in m.I for t in m.T)
+
         logic1_term = m.lambda_logic1 * sum( ( (m.u[i, t] - m.u_prev[i, t]) - (m.zON[i, t] - m.zOFF[i, t]) )**2 for i in m.I for t in m.T )
+
         logic2_term = m.lambda_logic2 * sum( m.zON[i, t] * m.zOFF[i, t] for i in m.I for t in m.T )
-        binary_beta_expr = sum( (2**j) * m.beta_binary[j] for j in m.BETA_BITS )
-        return commitment_cost + logic1_term + logic2_term + binary_beta_expr
+
+        benders_penalty_total = 0
+        for k in m.Cuts: # k is the index (0, 1, ..., num_cuts-1)
+            cut_data_k = iteration_data[k] # Get data for this specific cut
+
+            # Calculate the cut expression: SubObj_k + sum(Duals_k * (MasterVar - MasterVar_k))
+            cut_expr_k = _calculate_cut_expr_for_master(m, cut_data_k)
+
+            # Get the continuous slack variable for this cut
+            slack_k = m.s_continuous[k]
+
+            penalty_k = m.lambda_benders * (BETA - cut_expr_k - slack_k)**2
+            benders_penalty_total += penalty_k
+
+        return commitment_cost + logic1_term + logic2_term + benders_penalty_total + BETA
     model.OBJ = pyo.Objective(rule=master_objective_rule, sense=pyo.minimize)
-
-    # Benders Cuts Constraints
-    def benders_cut_rule(m, k):
-        # (Rule remains the same)
-        data = iteration_data[k]
-        sub_obj_k = data['sub_obj']
-        duals_k = data['duals']
-        u_k = data['u_vals']
-        zON_k = data['zON_vals']
-        zOFF_k = data['zOFF_vals']
-        cut_expr = sub_obj_k
-        for i in m.I: # MinPower
-            for t in m.T:
-                dual_val = duals_k['lambda_min'].get((i, t), 0.0)
-                cut_expr += dual_val * (m.Pmin[i] * (m.u[i, t] - u_k.get((i,t), 0.0)))
-        for i in m.I: # MaxPower
-            for t in m.T:
-                dual_val = duals_k['lambda_max'].get((i, t), 0.0)
-                cut_expr += dual_val * (m.Pmax[i] * (m.u[i, t] - u_k.get((i,t), 0.0)))
-        for i in m.I: # RampUp
-            for t in m.T:
-                dual_val = duals_k['lambda_ru'].get((i, t), 0.0)
-                u_prev_term = 0
-                u_prev_k = u_k.get((i, t-1), m.u_init[i]) if t > 1 else m.u_init[i]
-                if t > 1: u_prev_term = m.Ru[i] * (m.u[i, t-1] - u_prev_k)
-                zON_term = m.Rsu[i] * (m.zON[i, t] - zON_k.get((i, t), 0.0))
-                cut_expr += dual_val * (u_prev_term + zON_term)
-        for i in m.I: # RampDown
-            for t in m.T:
-                dual_val = duals_k['lambda_rd'].get((i, t), 0.0)
-                u_term = m.Rd[i] * (m.u[i, t] - u_k.get((i, t), 0.0))
-                zOFF_term = m.Rsd[i] * (m.zOFF[i, t] - zOFF_k.get((i, t), 0.0))
-                cut_expr += dual_val * (u_term + zOFF_term)
-        binary_beta_expr = sum( (2**j) * m.beta_binary[j] for j in m.BETA_BITS )
-        return binary_beta_expr >= cut_expr
-
-    model.BendersCuts = pyo.Constraint(model.Cuts, rule=benders_cut_rule) # Uses the first definition of model.Cuts
 
     return model
 
+def check_master_solution_feasibility(master_problem, iteration_data, benders_tolerance=1e-6):
+    
+    print("--- Checking Master Solution Feasibility (Logic Exact, Benders w/ Tol) ---")
+    
+    # Get current solution values - ROUND binary vars to handle solver tolerance
+    try:
+        u_sol = {(i,t): round(pyo.value(master_problem.u[i,t])) 
+                 for i in master_problem.I for t in master_problem.T}
+        zON_sol = {(i,t): round(pyo.value(master_problem.zON[i,t])) 
+                   for i in master_problem.I for t in master_problem.T}
+        zOFF_sol = {(i,t): round(pyo.value(master_problem.zOFF[i,t])) 
+                    for i in master_problem.I for t in master_problem.T}
+        beta_sol = pyo.value(master_problem.beta) 
+        
+        # Check if beta is None (shouldn't happen if optimal)
+        if beta_sol is None:
+             print("ERROR: Continuous variable beta is None. Cannot check feasibility.")
+             return False
+             
+    except Exception as e:
+        print(f"ERROR getting master solution values: {e}. Assuming infeasible.")
+        return False
+
+    # 1. Check Logic 1: u_it - u_{i,t-1} - zON_it + zOFF_it == 0 (Exact Check)
+    logic1_satisfied = True
+    for i in master_problem.I:
+        for t in master_problem.T:
+            # u_prev is based on the *initial* condition param OR the rounded solution value
+            u_prev_val = master_problem.u_init[i] if t == 1 else u_sol.get((i, t-1), master_problem.u_init[i]) 
+            u_val = u_sol[i,t]
+            zON_val = zON_sol[i,t]
+            zOFF_val = zOFF_sol[i,t]
+            
+            # Calculate residual using integers
+            residual = (u_val - u_prev_val) - (zON_val - zOFF_val)
+            
+            # Exact check for zero
+            if residual != 0:
+                print(f"DEBUG: Logic 1 VIOLATED for i={i}, t={t}. Exact Residual: {residual}")
+                logic1_satisfied = False
+                # return False # Option to return early
+                
+    if not logic1_satisfied: 
+        print("Overall Logic 1 status: VIOLATED")
+    else:
+        print("Overall Logic 1 status: OK")
+
+    # 2. Check Logic 2: zON_it + zOFF_it <= 1 (Exact Check)
+    logic2_satisfied = True
+    for i in master_problem.I:
+        for t in master_problem.T:
+            zON_val = zON_sol[i,t]
+            zOFF_val = zOFF_sol[i,t]
+            
+            # Exact check using integers
+            if zON_val + zOFF_val > 1:
+                print(f"DEBUG: Logic 2 VIOLATED for i={i}, t={t}. Sum: {zON_val + zOFF_val}")
+                logic2_satisfied = False
+                # return False # Option to return early
+                
+    if not logic2_satisfied:
+        print("Overall Logic 2 status: VIOLATED")
+    else:
+        print("Overall Logic 2 status: OK")
+        
+    # 3. Check Benders Cuts: beta >= cut_expr_k (Requires Tolerance)
+    benders_satisfied = True
+    if len(iteration_data) > 0:
+        # Helper function to evaluate cut expression using NUMERICAL values
+        def evaluate_cut_expr(solved_u_rounded, solved_zON_rounded, solved_zOFF_rounded, 
+                              cut_data, master_params):
+            # (Function definition exactly as in the previous response - calculates RHS value)
+            sub_obj_k = cut_data['sub_obj']
+            duals_k = cut_data['duals']
+            u_k = cut_data['u_vals']
+            zON_k = cut_data['zON_vals']
+            zOFF_k = cut_data['zOFF_vals']
+            
+            constant_term = sub_obj_k 
+            variable_part_value = 0.0 
+
+            I_set = master_params['I']
+            T_set = master_params['T']
+            pmin = master_params['Pmin']
+            pmax = master_params['Pmax']
+            ru = master_params['Ru']
+            rsu = master_params['Rsu']
+            rd = master_params['Rd']
+            rsd = master_params['Rsd']
+            u_init = master_params['u_init']
+
+            for i in I_set:
+                for t in T_set:
+                    # Min Power Term
+                    dual_val_min = duals_k['lambda_min'].get((i, t), 0.0)
+                    if abs(dual_val_min) > 1e-9: # Keep small tolerance for ignoring negligible duals
+                        term_coeff = -dual_val_min * pmin[i]
+                        variable_part_value += term_coeff * solved_u_rounded[i, t] # Use ROUNDED value
+                        constant_term -= term_coeff * u_k.get((i, t), 0.0)
+                    
+                    # Max Power Term
+                    dual_val_max = duals_k['lambda_max'].get((i, t), 0.0)
+                    if abs(dual_val_max) > 1e-9:
+                        term_coeff = dual_val_max * pmax[i]
+                        variable_part_value += term_coeff * solved_u_rounded[i, t] # Use ROUNDED value
+                        constant_term -= term_coeff * u_k.get((i, t), 0.0)
+
+                    # Ramp Up Term
+                    dual_val_ru = duals_k['lambda_ru'].get((i, t), 0.0)
+                    if abs(dual_val_ru) > 1e-9:
+                        term_coeff_u_prev = dual_val_ru * ru[i]
+                        u_prev_sol_val = u_init[i] if t == 1 else solved_u_rounded.get((i, t-1), u_init[i]) # Use ROUNDED value
+                        u_prev_k_val = u_init[i] if t == 1 else u_k.get((i, t - 1), u_init[i])
+                        variable_part_value += term_coeff_u_prev * u_prev_sol_val
+                        constant_term -= term_coeff_u_prev * u_prev_k_val
+                        
+                        term_coeff_zON = dual_val_ru * rsu[i]
+                        variable_part_value += term_coeff_zON * solved_zON_rounded[i, t] # Use ROUNDED value
+                        constant_term -= term_coeff_zON * zON_k.get((i, t), 0.0)
+
+                    # Ramp Down Term
+                    dual_val_rd = duals_k['lambda_rd'].get((i, t), 0.0)
+                    if abs(dual_val_rd) > 1e-9:
+                        term_coeff_u = dual_val_rd * rd[i]
+                        variable_part_value += term_coeff_u * solved_u_rounded[i,t] # Use ROUNDED value
+                        constant_term -= term_coeff_u * u_k.get((i, t), 0.0)
+
+                        term_coeff_zOFF = dual_val_rd * rsd[i]
+                        variable_part_value += term_coeff_zOFF * solved_zOFF_rounded[i, t] # Use ROUNDED value
+                        constant_term -= term_coeff_zOFF * zOFF_k.get((i, t), 0.0)
+
+            return constant_term + variable_part_value
+
+        # Store master params needed by evaluation function
+        master_params_dict = {
+            'I': master_problem.I, 'T': master_problem.T,
+            'Pmin': master_problem.Pmin, 'Pmax': master_problem.Pmax,
+            'Ru': master_problem.Ru, 'Rsu': master_problem.Rsu,
+            'Rd': master_problem.Rd, 'Rsd': master_problem.Rsd,
+            'u_init': master_problem.u_init
+        }
+
+        for k_idx in master_problem.Cuts:
+            cut_data_k = iteration_data[k_idx]
+            # Evaluate using ROUNDED binary values from the solution
+            cut_rhs_value = evaluate_cut_expr(u_sol, zON_sol, zOFF_sol, cut_data_k, master_params_dict)
+            
+            # Check if beta >= cut_rhs_value (within tolerance)
+            # beta - cut_rhs_value >= -benders_tolerance
+            if beta_sol - cut_rhs_value < -benders_tolerance:
+                print(f"DEBUG: Benders Cut {k_idx} VIOLATED. beta: {beta_sol:.4f}, cut_rhs: {cut_rhs_value:.4f}, Diff: {beta_sol - cut_rhs_value:.4g}")
+                benders_satisfied = False
+                # return False # Option to return early
+
+    if not benders_satisfied:
+         print("Overall Benders Cuts status: VIOLATED")
+    else:
+         print("Overall Benders Cuts status: OK")
+
+
+    # Final Decision - Return False if ANY check failed
+    all_satisfied = logic1_satisfied and logic2_satisfied and benders_satisfied
+    print(f"--- Feasibility Check Result: {all_satisfied} ---")
+    return all_satisfied
 
 # Main Benders Loop
 def main():
@@ -345,17 +559,56 @@ def main():
         # Solving the master Problem
         print("\n--- Solving Master Problem ---")
         master_problem = build_master(iteration_data)
-        master_solver.options['NumericFocus'] = 1
+        master_solver.options['NumericFocus'] = 3
         master_results = master_solver.solve(master_problem, tee=True)
 
         # Checks status
         if master_results.solver.termination_condition == TerminationCondition.optimal:
             master_obj_val = pyo.value(master_problem.OBJ)
-            lower_bound = master_obj_val-1
-            print(f"Master Status: Optimal")
-            print(f"Master Objective (Commitment Cost + Beta): {master_obj_val:.4f}")
-            print(f"Updated Lower Bound (Z_LB): {lower_bound:.4f}")
 
+            commitment_cost_master_sol = sum(
+                pyo.value(master_problem.Cf[i] * master_problem.u[i, t]) +
+                pyo.value(master_problem.Csu[i] * master_problem.zON[i, t]) +
+                pyo.value(master_problem.Csd[i] * master_problem.zOFF[i, t])
+                for i in master_problem.I for t in master_problem.T
+            )
+            print(f"Commitment Cost (Master): {commitment_cost_master_sol:.4f}")
+
+            '''
+            beta_master_sol = sum(
+                (2**j) * pyo.value(master_problem.beta_binary[j])
+                for j in master_problem.BETA_BITS
+            )
+            '''
+            beta_master_sol = pyo.value(master_problem.beta) # Use the continuous beta variable
+
+            print(f"Beta (Master): {beta_master_sol:.4f}")
+            #printing commitmencost + beta
+            print(f"Commitment Cost + Beta (Master): {commitment_cost_master_sol + beta_master_sol:.4f}")
+
+            is_feasible = check_master_solution_feasibility(master_problem, iteration_data, benders_tolerance=1e-6)
+
+            if is_feasible:
+                print("Master solution is feasible.")
+                current_lb_candidate = commitment_cost_master_sol + beta_master_sol
+                lower_bound = max(lower_bound, current_lb_candidate)
+            else:
+                print("Master solution is NOT feasible. Not Updating lower bound.")
+                lower_bound = lower_bound
+            
+            '''
+            total_penalties_value = master_obj_val - commitment_cost_master_sol - beta_master_sol
+            print(f"total_penalties_value: {total_penalties_value:.4f}")
+            if total_penalties_value < 1e-6:
+                current_lb_candidate = commitment_cost_master_sol + beta_master_sol
+                lower_bound = max(lower_bound, current_lb_candidate)
+            else:
+                lower_bound = lower_bound
+            print(f"Master Status: Optimal")
+            print(f"Master Objective (Commitment Cost +penalties+ Beta): {master_obj_val:.4f}")
+            print(f"Updated Lower Bound (Z_LB): {lower_bound:.4f}")
+            '''
+            
             # Updates u_current, zON_current, zOFF_current for next iteration
             u_current = {(i,t): (master_problem.u[i,t].value if master_problem.u[i,t].value is not None else 0.0)
                          for i in generators for t in time_periods}
