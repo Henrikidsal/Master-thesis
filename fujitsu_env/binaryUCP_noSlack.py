@@ -24,10 +24,10 @@ lambda_0 = 30           # Logic 1
 lambda_logic2 = 20      # Logic 2 
 demand_lambda1 = 730000  # Demand 
 demand_lambda2 = 8600
-ramp_up_lambda1 = 10     # Ramp-Up 
-ramp_up_lambda2 = 10
-ramp_down_lambda1 = 10   # Ramp-Down 
-ramp_down_lambda2 = 10
+ramp_up_lambda1 = 1     # Ramp-Up 
+ramp_up_lambda2 = 0.5
+ramp_down_lambda1 = 1   # Ramp-Down 
+ramp_down_lambda2 = 0.5
 
 # parameters
 P_max = {1:350, 2:200, 3:140}
@@ -109,12 +109,10 @@ for t in range(1, T):
         h_up_it = BinPol(); h_up_it.add_term(R_up[i+1]); h_up_it.add_term(-P_max[i+1], ('u', i, t)); h_up_it.add_term(P_max[i+1], ('u', i, t-1))
         qubo.add(h_up_it, -ramp_up_lambda1); qubo.add(h_up_it.power2(), ramp_up_lambda2)
 
-# --- Constraint 5: Ramp-Down Constraint (Inequality) ---
-# (Print removed)
-# t=1 transition
 for i in range(N):
     h_down_i0 = BinPol(); h_down_i0.add_term(R_down[i+1]); h_down_i0.add_term(-P_max[i+1] * u_prev[i+1]); h_down_i0.add_term(P_max[i+1], ('u', i, 0))
     qubo.add(h_down_i0, -ramp_down_lambda1); qubo.add(h_down_i0.power2(), ramp_down_lambda2)
+
 # t >= 2 transitions
 for t in range(1, T):
     for i in range(N):
@@ -123,7 +121,7 @@ for t in range(1, T):
 
 # (Print removed)
 
-# --- Solving the QUBO ---
+# solving
 start = timeit.default_timer()
 solver = QUBOSolverCPU(
     optimization_method='parallel_tempering',
@@ -133,11 +131,10 @@ solver = QUBOSolverCPU(
     temperature_sampling=True,
     scaling_action=ScalingAction.AUTO_SCALING,
 )
-# (Print removed)
-# --- KEEP: Solver internal print happens here ---
+
 solution_list = solver.minimize(qubo)
 stop = timeit.default_timer()
-# --- KEEP ---
+
 print(f"Solver finished in {stop - start:.2f} seconds.")
 
 # --- Analyzing the Solution ---

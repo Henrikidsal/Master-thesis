@@ -1,6 +1,8 @@
 ##### This is a script that solves the continous version of the UCP
 ##### It uses Benders Decomposition, where both master and subproblem are solved using Pyomo, classically
-##### No QUBO solver is used here.
+##### THe logic constraints, both types, are penalty terms
+##### Only benders optimality cuts are constraints.
+##### The LB could be calculated as only commitment cost + beta, but here its the full QUBO value. It works because logics are never violated.
 
 ##### basic imports
 import pyomo.environ as pyo
@@ -32,10 +34,10 @@ u_initial = {1: 0, 2: 0, 3: 1}
 p_initial = {1: 0, 2: 0, 3: 100}
 
 # Large Penalty for slack variables, in sub problem
-M_penalty = 2e2
+M_penalty = 1e4
 
 # Number of bits for beta variable
-num_beta_bits = 9
+num_beta_bits = 10
 
 # Function creating the sub problem
 def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
@@ -221,7 +223,7 @@ def build_master(iteration_data):
 # Main Benders Loop
 def main():
     start_time = time.time()
-    max_iter = 30 # Maximum number of iterations for Benders loop
+    max_iter = 20 # Maximum number of iterations for Benders loop
     epsilon = 1 # Convergence tolerance for gap
     iteration_data = []
     lower_bound = -float('inf')
@@ -348,6 +350,24 @@ def main():
         master_solver.options['NumericFocus'] = 1
         master_results = master_solver.solve(master_problem, tee=True)
 
+        commitment_cost_master_sol = sum(
+                pyo.value(master_problem.Cf[i] * master_problem.u[i, t]) +
+                pyo.value(master_problem.Csu[i] * master_problem.zON[i, t]) +
+                pyo.value(master_problem.Csd[i] * master_problem.zOFF[i, t])
+                for i in master_problem.I for t in master_problem.T
+            )
+
+        #Prints the total QUBO value from master problem
+        total_qubo_value = pyo.value(master_problem.OBJ)
+        print(f"Master Problem QUBO Objective Value: {total_qubo_value:.4f}")
+
+        #prints only the beta value from the master problem
+        beta_value = sum((2**j) * master_problem.beta_binary[j].value for j in master_problem.BETA_BITS)
+        print(f"Master Problem Beta Value: {beta_value:.4f}")
+
+        # Prints the commitment cost from the master problem
+        print(f"Master Problem Commitment Cost: {commitment_cost_master_sol:.4f}")
+
         # Checks status
         if master_results.solver.termination_condition == TerminationCondition.optimal:
             master_obj_val = pyo.value(master_problem.OBJ)
@@ -363,6 +383,81 @@ def main():
                            for i in generators for t in time_periods}
             zOFF_current = {(i,t): (master_problem.zOFF[i,t].value if master_problem.zOFF[i,t].value is not None else 0.0)
                             for i in generators for t in time_periods}
+
+
+            print("\n--- Verifying Benders Optimality Cuts Satisfaction (Hard Constraints) ---")
+            if not iteration_data:
+                print("No Benders cuts to verify yet.")
+            else:
+                    # beta_value is the beta solved by the current master problem
+                    # u_current, zON_current, zOFF_current are the x solved by the current master problem
+                    
+                for k_idx, cut_data_from_iter in enumerate(iteration_data):
+                        # These are theta_j, duals_j, and x_j for cut j (indexed by k_idx here)
+                        # x_j is the master solution that *generated* this cut.
+                    sub_obj_j = cut_data_from_iter['sub_obj']
+                    duals_j = cut_data_from_iter['duals']
+                    u_j = cut_data_from_iter['u_vals']
+                    zON_j = cut_data_from_iter['zON_vals']
+                    zOFF_j = cut_data_from_iter['zOFF_vals']
+
+                        # Calculate RHS_j = theta_j + Phi_j^T (x_master_solved - x_j)
+                        # where x_master_solved is current u_current, zON_current, zOFF_current
+                        
+                    phi_term_value = 0
+                        # MinPower & MaxPower terms for Phi_j^T (x - x_j)
+                    for i_gen_loop in generators: # Iterate using generators set
+                        for t_loop in time_periods: # Iterate using time_periods set
+                                # MinPower: dual_min * Pmin * (u_current - u_j)
+                            phi_term_value += duals_j['lambda_min'].get((i_gen_loop, t_loop), 0.0) * \
+                                gen_data[i_gen_loop]['Pmin'] * (u_current.get((i_gen_loop,t_loop),0.0) - u_j.get((i_gen_loop,t_loop), 0.0))
+                                
+                                # MaxPower: dual_max * Pmax * (u_current - u_j)
+                                # Note: In your build_master, it's `dual_val * (m.Pmax[i] * (m.u[i,t] - u_k_val))`
+                                # This implies dual_max is for constraint Pmax*u - p >= 0, or similar that results in this form.
+                            phi_term_value += duals_j['lambda_max'].get((i_gen_loop, t_loop), 0.0) * \
+                                gen_data[i_gen_loop]['Pmax'] * (u_current.get((i_gen_loop,t_loop),0.0) - u_j.get((i_gen_loop,t_loop), 0.0))
+
+                        # RampUp & RampDown terms for Phi_j^T (x - x_j)
+                    for i_gen_loop in generators:
+                        for t_loop in time_periods:
+                                # RampUp: dual_ru * ( Ru*(u_prev_current - u_prev_j) + Rsu*(zON_current - zON_j) )
+                            u_prev_current_val = u_initial[i_gen_loop] if t_loop == 1 else u_current.get((i_gen_loop,t_loop-1), 0.0)
+                            u_prev_j_val = u_initial[i_gen_loop] if t_loop == 1 else u_j.get((i_gen_loop,t_loop-1), 0.0)
+                                
+                            term_ramp_up_phi = 0
+                            if t_loop > 1:
+                                term_ramp_up_phi += gen_data[i_gen_loop]['Ru'] * (u_current.get((i_gen_loop,t_loop-1),0.0) - u_prev_j_val)
+                                # else, for t_loop=1, u_prev_current is u_init, u_prev_j_val is also u_init if x_j was consistent, so diff is 0.
+                                # The original benders_cut_rule was: if t > 1: u_prev_term = m.Ru[i] * (m.u[i, t-1] - u_prev_k)
+                                # This matches the above if statement.
+
+                            term_ramp_up_phi += gen_data[i_gen_loop]['Rsu'] * (zON_current.get((i_gen_loop,t_loop),0.0) - zON_j.get((i_gen_loop,t_loop), 0.0))
+                            phi_term_value += duals_j['lambda_ru'].get((i_gen_loop,t_loop),0.0) * term_ramp_up_phi
+
+                                # RampDown: dual_rd * ( Rd*(u_current - u_j) + Rsd*(zOFF_current - zOFF_j) )
+                            term_ramp_down_phi = 0
+                            term_ramp_down_phi += gen_data[i_gen_loop]['Rd'] * (u_current.get((i_gen_loop,t_loop),0.0) - u_j.get((i_gen_loop,t_loop), 0.0))
+                            term_ramp_down_phi += gen_data[i_gen_loop]['Rsd'] * (zOFF_current.get((i_gen_loop,t_loop),0.0) - zOFF_j.get((i_gen_loop,t_loop), 0.0))
+                            phi_term_value += duals_j['lambda_rd'].get((i_gen_loop,t_loop),0.0) * term_ramp_down_phi
+                        
+                    calculated_rhs_j = sub_obj_j + phi_term_value
+                    h_value_cut_j = beta_value - calculated_rhs_j # beta_value is from current master solution
+
+                    print(f"Cut {k_idx+1} (from iter {cut_data_from_iter['iter']}):")
+                    print(f"  theta_j: {sub_obj_j:.4f}")
+                    print(f"  Phi_j^T(x_master_sol - x_j): {phi_term_value:.4f}")
+                    print(f"  Calculated RHS_j for current master_sol: {calculated_rhs_j:.4f}")
+                    print(f"  Master solution beta_value: {beta_value:.4f}")
+                    print(f"  Satisfaction (beta_value - RHS_j): {h_value_cut_j:.4f}")
+
+                    tolerance = 1e-4 # Solver tolerance
+                    if h_value_cut_j >= -tolerance:
+                        print(f"  Status: SATISFIED (or very close)")
+                    else:
+                        print(f"  Status: VIOLATED by {-h_value_cut_j:.4f} (SHOULD NOT HAPPEN with hard constraints)")
+            print("--- End of Benders Cuts Verification (Hard Constraints) ---")
+        ###
 
         else:
             print(f"Master Problem FAILED to solve optimally! Status: {master_results.solver.termination_condition}")
