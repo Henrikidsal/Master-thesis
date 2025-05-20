@@ -34,10 +34,10 @@ u_initial = {1: 0, 2: 0, 3: 1}
 p_initial = {1: 0, 2: 0, 3: 100}
 
 # Large Penalty for slack variables, in sub problem
-M_penalty = 1e4
+M_penalty = 670
 
 # Number of bits for beta variable
-num_beta_bits =9
+num_beta_bits =8
 
 # Function creating the sub problem
 def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
@@ -111,11 +111,13 @@ def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
         return m.p[i, t] <= m.Pmax[i] * m.u_fixed[i, t]
     model.MaxPower = pyo.Constraint(model.I, model.T, rule=max_power_rule)
 
+    
     # Constrainr: Ramping up limit
     def ramp_up_rule(m, i, t):
         return m.p[i, t] - m.p_prev[i,t] <= m.Ru[i] * m.u_prev_fixed[i,t] + m.Rsu[i] * m.zON_fixed[i, t]
     model.RampUp = pyo.Constraint(model.I, model.T, rule=ramp_up_rule)
 
+    
     # Constraint: Ramping down limit
     def ramp_down_rule(m, i, t):
         return m.p_prev[i,t] - m.p[i, t] <= m.Rd[i] * m.u_fixed[i, t] + m.Rsd[i] * m.zOFF_fixed[i, t]
@@ -149,16 +151,16 @@ def build_master(iteration_data):
     model.Csd = pyo.Param(model.I, initialize={i: gen_data[i]['Csd'] for i in model.I})
     model.D_param = pyo.Param(model.T, initialize=demand) # Renamed
     model.u_init = pyo.Param(model.I, initialize=u_initial)
-    model.lambda_logic1 = pyo.Param(initialize=20) # Increased penalty
-    model.lambda_logic2 = pyo.Param(initialize= 18) # Increased penalty
-    model.lambda_benderscut = pyo.Param(initialize=3) # Penalty for Benders cuts, can be tuned
+    model.lambda_logic1 = pyo.Param(initialize=20) # lamdba for logic1 penalty
+    model.lambda_logic2 = pyo.Param(initialize= 1) # lambda for logic2 penalty
+    model.lambda_benderscut = pyo.Param(initialize=5) # Penalty for Benders cuts
 
     # Parameters for Benders cut coefficients (used in objective)
-    model.Pmin_param = pyo.Param(model.I, initialize={i: gen_data[i]['Pmin'] for i in model.I}) # Renamed
-    model.Rd_param = pyo.Param(model.I, initialize={i: gen_data[i]['Rd'] for  i in model.I})       # Renamed
-    model.Rsd_param = pyo.Param(model.I, initialize={i: gen_data[i]['Rsd'] for i in model.I})    # Renamed
-    model.Ru_param = pyo.Param(model.I, initialize={i: gen_data[i]['Ru'] for i in model.I})       # Renamed
-    model.Rsu_param = pyo.Param(model.I, initialize={i: gen_data[i]['Rsu'] for i in model.I})    # Renamed
+    model.Pmin_param = pyo.Param(model.I, initialize={i: gen_data[i]['Pmin'] for i in model.I})
+    model.Rd_param = pyo.Param(model.I, initialize={i: gen_data[i]['Rd'] for  i in model.I})   
+    model.Rsd_param = pyo.Param(model.I, initialize={i: gen_data[i]['Rsd'] for i in model.I})  
+    model.Ru_param = pyo.Param(model.I, initialize={i: gen_data[i]['Ru'] for i in model.I})    
+    model.Rsu_param = pyo.Param(model.I, initialize={i: gen_data[i]['Rsu'] for i in model.I})    
 
     # Variables
     model.u = pyo.Var(model.I, model.T, within=pyo.Binary)
@@ -233,16 +235,18 @@ def build_master(iteration_data):
 
     model.OBJ = pyo.Objective(rule=master_objective_rule, sense=pyo.minimize)
 
-    # Benders Cuts Constraints are REMOVED
-    # model.BendersCuts = pyo.Constraint(model.Cuts, rule=benders_cut_rule)
-
+    '''
+    def dynamic_min_generators_on_rule(m, t_model):
+        return sum(m.u[i, t_model] for i in m.I) >= min_generators_needed_for_demand[t_model]
+    model.DynamicMinGeneratorsOn = pyo.Constraint(model.T, rule=dynamic_min_generators_on_rule)
+    '''
     return model
 
 
 # Main Benders Loop
 def main():
     start_time = time.time()
-    max_iter = 30 # Maximum number of iterations for Benders loop
+    max_iter = 20 # Maximum number of iterations for Benders loop
     epsilon = 1 # Convergence tolerance for gap
     iteration_data = []
     lower_bound = -float('inf')
@@ -411,6 +415,9 @@ def main():
         master_solver.options['NumericFocus'] = 3
         #master_solver.options['Presolve'] = 0
         #master_solver.options['NonConvex'] = 2
+        #master_solver.options['ScaleFlag'] = 2
+        #master_solver.options['Aggregate']=0
+        #master_solver.options['IntegralityFocus'] = 1
         master_results = master_solver.solve(master_problem, tee=True) 
 
         if master_results.solver.termination_condition == TerminationCondition.optimal or \
@@ -421,8 +428,8 @@ def main():
             print(f"Master Status: {master_results.solver.termination_condition}")
             print(f"Master Problem Raw Objective Value (Full QUBO): {master_obj_val_from_solver:.4f}")
             
-            # --- START MOVED BLOCK ---
-            # Extract solution values from master_problem IMMEDIATELY after solve
+   
+            # Extract solution values from master_problem after solving the master problem
             beta_val = sum((2**j) * pyo.value(master_problem.beta_binary[j]) for j in master_problem.BETA_BITS)
             commitment_cost_master = sum(pyo.value(master_problem.Cf[i] * master_problem.u[i, t_loop]) +
                                          pyo.value(master_problem.Csu[i] * master_problem.zON[i, t_loop]) +
@@ -434,7 +441,7 @@ def main():
             zOFF_sol = {(i_gen,t_time): pyo.value(master_problem.zOFF[i_gen,t_time]) for i_gen in generators for t_time in time_periods}
             s_cuts_sol = {c_idx: pyo.value(master_problem.s_cuts[c_idx]) for c_idx in master_problem.Cuts}
             beta_binary_sol = {j_bit: pyo.value(master_problem.beta_binary[j_bit]) for j_bit in master_problem.BETA_BITS} # Renamed j to j_bit
-            # --- END MOVED BLOCK ---
+
 
             print(f"Master Problem Beta Value: {beta_val:.4f}")
             print(f"Master Problem Commitment Cost: {commitment_cost_master:.4f}")
@@ -452,16 +459,16 @@ def main():
                     zOFF_k = cut_data['zOFF_vals']  
                     cut_rhs_value_verified = sub_obj_k
                     
-                    for i_gen_loop in generators: # Renamed i to avoid conflict
-                        for t_time_loop in time_periods: # Renamed t to avoid conflict
+                    for i_gen_loop in generators: 
+                        for t_time_loop in time_periods: 
                             cut_rhs_value_verified += duals_k['lambda_min'].get((i_gen_loop, t_time_loop), 0.0) * \
                                 gen_data[i_gen_loop]['Pmin'] * (u_sol.get((i_gen_loop,t_time_loop),0.0) - u_k.get((i_gen_loop,t_time_loop), 0.0))
                             cut_rhs_value_verified += duals_k['lambda_max'].get((i_gen_loop, t_time_loop), 0.0) * \
                                 (gen_data[i_gen_loop]['Pmax']) * (u_sol.get((i_gen_loop,t_time_loop),0.0) - u_k.get((i_gen_loop,t_time_loop), 0.0))
                             
 
-                    for i_gen_loop in generators: # Renamed i to avoid conflict
-                        for t_time_loop in time_periods: # Renamed t to avoid conflict
+                    for i_gen_loop in generators:
+                        for t_time_loop in time_periods:
                             term_ramp_up_verified = 0
                             u_prev_k_val = u_initial[i_gen_loop] if t_time_loop == 1 else u_k.get((i_gen_loop,t_time_loop-1), 0.0)
                             if t_time_loop > 1:
@@ -554,13 +561,9 @@ def main():
                 lower_bound = max(lower_bound, current_potential_lb)
                 print(f"Master problem penalties are small. Commitment Cost + Beta = {current_potential_lb:.4f}")
             else:
-                # Retain previous lower_bound if penalties are not small, 
-                # as current_potential_lb is not a true LB to original problem then.
-                # Or, use master_obj_val_from_solver if it's guaranteed to be non-decreasing for the QUBO.
-                # For now, keeping old LB is safer if penalties are large.
+
                 print(f"Master problem penalties are NOT small ({logic1_penalty_val:.2f}, {logic2_penalty_val:.2f}, {benders_penalty_total_val:.2f}). Using old LB or QUBO obj based LB strategy.")
-                # If penalties are high, the master_obj_val_from_solver is a lower bound to the penalized problem.
-                # We might want to ensure lower_bound is non-decreasing.
+
                 lower_bound = max(lower_bound, master_obj_val_from_solver) # Update LB with raw QUBO value
 
 
@@ -596,9 +599,6 @@ def main():
            master_results.solver.termination_condition != TerminationCondition.feasible and \
            sub_results.solver.termination_condition != TerminationCondition.optimal and \
            sub_results.solver.termination_condition != TerminationCondition.feasible:
-             # If loop broke early due to solver failure, k might be the iter it failed ON.
-             # If it completed all iters or converged, k is iter+1, so k-1 or the actual iter count.
-             # The current 'k' is the one that *would have been* next or is max_iter + 1
              pass # iteration_data[-1]['iter'] would be the last successful one.
     
     print(f"Iterations Performed: {len(iteration_data)}") # More reliable count of completed iterations

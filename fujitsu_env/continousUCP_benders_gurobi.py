@@ -34,10 +34,10 @@ u_initial = {1: 0, 2: 0, 3: 1}
 p_initial = {1: 0, 2: 0, 3: 100}
 
 # Large Penalty for slack variables, in sub problem
-M_penalty = 1e4
+M_penalty = 200 #2
 
 # Number of bits for beta variable
-num_beta_bits = 10
+num_beta_bits = 9 #7
 
 # Function creating the sub problem
 def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
@@ -86,6 +86,7 @@ def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
 
     # A smart placeholder that always gives the correct power output for the previous time period, even if t=1
     def p_prev_rule(m, i, t):
+
         if t == 1:
             return m.p_init[i]
         else:
@@ -149,8 +150,8 @@ def build_master(iteration_data):
     model.Csd = pyo.Param(model.I, initialize={i: gen_data[i]['Csd'] for i in model.I})
     model.D = pyo.Param(model.T, initialize=demand)
     model.u_init = pyo.Param(model.I, initialize=u_initial)
-    model.lambda_logic1 = pyo.Param(initialize=20) 
-    model.lambda_logic2 = pyo.Param(initialize=20)
+    model.lambda_logic1 = pyo.Param(initialize=20) #20
+    model.lambda_logic2 = pyo.Param(initialize=1) #1 or lower
 
     # Parameters for Benders cut coefficients
     model.Pmin = pyo.Param(model.I, initialize={i: gen_data[i]['Pmin'] for i in model.I})
