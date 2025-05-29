@@ -2,7 +2,7 @@ import pyomo.environ as pyo
 
 model = pyo.ConcreteModel()
 
-model.Lambda = pyo.Param(initialize=10000, mutable=True)  
+model.Lambda = pyo.Param(initialize=100000, mutable=True)  
 model.RHS_cut1 = pyo.Param(initialize=235.007, mutable=True)  
 #model.RHS_cut2 = pyo.Param(initialize=185.1, mutable=True)  
 #model.RHS_cut3 = pyo.Param(initialize=364.0099, mutable=True)

@@ -152,9 +152,9 @@ def build_master(iteration_data):
     model.Rsu = pyo.Param(model.I, initialize={i: gen_data[i]['Rsu'] for i in model.I})
 
     # Variables 
-    model.u = pyo.Var(model.I, model.T, within=pyo.Binary)
-    model.zON = pyo.Var(model.I, model.T, within=pyo.Binary)
-    model.zOFF = pyo.Var(model.I, model.T, within=pyo.Binary)
+    model.u = pyo.Var(model.I, model.T, within=pyo.NonNegativeReals , bounds=(0, 1)) # Commitment variable (ON/OFF status)
+    model.zON = pyo.Var(model.I, model.T, within=pyo.NonNegativeReals , bounds=(0, 1)) # Binary-like variable for ON/OFF status
+    model.zOFF = pyo.Var(model.I, model.T, within=pyo.NonNegativeReals, bounds=(0, 1)) # Binary-like variable for ON/OFF status
     model.beta = pyo.Var(within=pyo.NonNegativeReals) # Estimated subproblem cost
 
     # Objective function for master problem

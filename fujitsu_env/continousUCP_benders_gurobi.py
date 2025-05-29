@@ -34,10 +34,10 @@ u_initial = {1: 0, 2: 0, 3: 1}
 p_initial = {1: 0, 2: 0, 3: 100}
 
 # Large Penalty for slack variables, in sub problem
-M_penalty = 200 #2
+M_penalty = 670 #2
 
 # Number of bits for beta variable
-num_beta_bits = 9 #7
+num_beta_bits = 8 #7
 
 # Function creating the sub problem
 def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):

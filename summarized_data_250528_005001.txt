@@ -1,0 +1,10 @@
+Final Lower Bound (Z_LB): 156.9767
+Final Upper Bound (Z_UB): 193.5000
+Final Gap: 0.188751
+Total Time: 2.92 seconds
+Best Found Solution (from iteration 6):
+  Best Total Cost: 193.5000
+  Commitment Schedule (u_it):
+    t=1: 1: 1, 2: 1, 3: 0
+    t=2: 1: 1, 2: 1, 3: 0
+    t=3: 1: 1, 2: 1, 3: 0

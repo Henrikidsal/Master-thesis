@@ -2,7 +2,7 @@
 ##### It uses Benders Decomposition, where both master and subproblem are solved using Pyomo, classically
 ##### THe logic constraints, both types, are penalty terms
 ##### Benders optimality and feasibility cuts are constraints.
-##### The LB could be calculated as only commitment cost + beta, but here its the full QUBO value. It works because logics are never violated.
+##### Feasibility cuts use FarkasDual attributes obtained via gurobi_persistent.
 
 ##### basic imports
 import pyomo.environ as pyo
@@ -10,14 +10,14 @@ from pyomo.environ import *
 from pyomo.opt import SolverFactory, TerminationCondition
 import time
 import math
-from pyomo.solvers.plugins.solvers.gurobi_persistent import GurobiPersistent
-import gurobipy as grb
-from copy import deepcopy 
+
+# Choose the number of time periods wanted:
+Periods = 1
 
 # Sets
 generators = [1, 2, 3]
-time_periods = [x for x in range(1, 4)] # T=3 hours
-time_periods_with_0 = [x for x in range(0, 4)] # Including t=0 for initial conditions
+time_periods = [x for x in range(1, Periods+1)] # T=3 hours
+time_periods_with_0 = [x for x in range(0, Periods+1)] # Including t=0 for initial conditions
 
 # Generator Parameters
 gen_data = {
@@ -27,29 +27,22 @@ gen_data = {
 }
 
 # Demand and Reserve Parameters
-demand = {1: 160, 2: 500, 3: 400}
+demand = {1: 160} # Demand for each time period
 
 
 # Initial Conditions for T = 0
-# u_it: ON/OFF status
 u_initial = {1: 0, 2: 0, 3: 1}
-# p_it: Power output
 p_initial = {1: 0, 2: 0, 3: 100}
 
 # Number of bits for beta variable
-num_beta_bits = 9 #7
+num_beta_bits = 5
 
-# Function creating the sub problem
+# Function creating the sub problem (LP)
 def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
-
     model = pyo.ConcreteModel(name="UCP_Subproblem")
-
-    # Sets
     model.I = pyo.Set(initialize=generators)
     model.T = pyo.Set(initialize=time_periods)
-    model.T0 = pyo.Set(initialize=time_periods_with_0)
 
-    # Fixed parameters from master problem
     u_fixed_param_vals = {(i,t): u_fixed_vals[i,t] for i in model.I for t in model.T}
     zON_fixed_param_vals = {(i,t): zON_fixed_vals[i,t] for i in model.I for t in model.T}
     zOFF_fixed_param_vals = {(i,t): zOFF_fixed_vals[i,t] for i in model.I for t in model.T}
@@ -58,7 +51,6 @@ def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
     model.zON_fixed = pyo.Param(model.I, model.T, initialize=zON_fixed_param_vals, mutable=True)
     model.zOFF_fixed = pyo.Param(model.I, model.T, initialize=zOFF_fixed_param_vals, mutable=True)
 
-    # --- Parameters ---
     model.Pmin = pyo.Param(model.I, initialize={i: gen_data[i]['Pmin'] for i in model.I})
     model.Pmax = pyo.Param(model.I, initialize={i: gen_data[i]['Pmax'] for i in model.I})
     model.Rd = pyo.Param(model.I, initialize={i: gen_data[i]['Rd'] for i in model.I})
@@ -70,117 +62,58 @@ def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
     model.u_init = pyo.Param(model.I, initialize=u_initial)
     model.p_init = pyo.Param(model.I, initialize=p_initial)
 
-    # --- Variables ---
     model.p = pyo.Var(model.I, model.T, within=pyo.NonNegativeReals)
 
-    # --- Objective Function ---
     def objective_rule(m):
-        variable_cost = sum(m.Cv[i] * m.p[i, t] for i in m.I for t in m.T)
-        return variable_cost
+        return sum(m.Cv[i] * m.p[i, t] for i in m.I for t in m.T)
     model.OBJ = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
 
-    # --- Constraints ---
-
     def p_prev_rule(m, i, t):
-        if t == 1:
-            return m.p_init[i]
-        else:
-            return m.p[i, t-1]
+        return m.p_init[i] if t == 1 else m.p[i, t-1]
     model.p_prev = pyo.Expression(model.I, model.T, rule=p_prev_rule)
 
     def u_prev_fixed_rule(m, i, t):
-        if t == 1:
-            return m.u_init[i]
-        else:
-            return m.u_fixed[i, t-1]
+        return m.u_init[i] if t == 1 else m.u_fixed[i, t-1]
     model.u_prev_fixed = pyo.Expression(model.I, model.T, rule=u_prev_fixed_rule)
 
+    model.MinPower = pyo.Constraint(model.I, model.T, rule=lambda m, i, t: m.Pmin[i] * m.u_fixed[i, t] <= m.p[i, t])
+    model.MaxPower = pyo.Constraint(model.I, model.T, rule=lambda m, i, t: m.p[i, t] <= m.Pmax[i] * m.u_fixed[i, t])
+    model.RampUp = pyo.Constraint(model.I, model.T, rule=lambda m,i,t: m.p[i,t] - m.p_prev[i,t] <= m.Ru[i] * m.u_prev_fixed[i,t] + m.Rsu[i] * m.zON_fixed[i, t])
+    model.RampDown = pyo.Constraint(model.I, model.T, rule=lambda m,i,t: m.p_prev[i,t] - m.p[i,t] <= m.Rd[i] * m.u_fixed[i,t] + m.Rsd[i] * m.zOFF_fixed[i,t])
+    model.Demand = pyo.Constraint(model.T, rule=lambda m, t: sum(m.p[i, t] for i in m.I) >= m.D[t])
 
-    # Constraint: Minimum power output
-    # p_it >= Pmin_i * u_it  =>  Pmin_i * u_it - p_it <= 0
-    def min_power_rule(m, i, t):
-        return m.Pmin[i] * m.u_fixed[i, t] <= m.p[i, t]
-    model.MinPower = pyo.Constraint(model.I, model.T, rule=min_power_rule)
-
-    # Constraint: Maximum power output
-    # p_it <= Pmax_i * u_it  =>  p_it - Pmax_i * u_it <= 0
-    def max_power_rule(m, i, t):
-        return m.p[i, t] <= m.Pmax[i] * m.u_fixed[i, t]
-    model.MaxPower = pyo.Constraint(model.I, model.T, rule=max_power_rule)
-
-    # Constraint: Ramping up limit
-    # p_it - p_i(t-1) <= Ru_i * u_i(t-1)_fixed + Rsu_i * zON_it_fixed
-    # => p_it - p_i(t-1) - Ru_i * u_i(t-1)_fixed - Rsu_i * zON_it_fixed <= 0
-    def ramp_up_rule(m, i, t):
-        return m.p[i, t] - m.p_prev[i,t] <= m.Ru[i] * m.u_prev_fixed[i,t] + m.Rsu[i] * m.zON_fixed[i, t]
-    model.RampUp = pyo.Constraint(model.I, model.T, rule=ramp_up_rule)
-
-    # Constraint: Ramping down limit
-    # p_i(t-1) - p_it <= Rd_i * u_it_fixed + Rsd_i * zOFF_it_fixed
-    # => p_i(t-1) - p_it - Rd_i * u_it_fixed - Rsd_i * zOFF_it_fixed <= 0
-    def ramp_down_rule(m, i, t):
-        return m.p_prev[i,t] - m.p[i, t] <= m.Rd[i] * m.u_fixed[i, t] + m.Rsd[i] * m.zOFF_fixed[i, t]
-    model.RampDown = pyo.Constraint(model.I, model.T, rule=ramp_down_rule)
-
-    # Constraint: Demand balance
-    # sum(p_it for i in I) >= D_t  => D_t - sum(p_it for i in I) <= 0
-    def demand_rule(m, t):
-        # return sum(m.p[i, t] for i in m.I) + m.demand_slack[t] >= m.D[t] # CHANGED
-        return sum(m.p[i, t] for i in m.I) >= m.D[t]
-    model.Demand = pyo.Constraint(model.T, rule=demand_rule)
-
-    # --- Dual Suffix (for optimality cuts and Farkas rays) ---
     model.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
-    # --- IIS Suffix (for Farkas rays if Gurobi provides them this way, Gurobi usually uses .UnbdRay) ---
-    # model.iis = pyo.Suffix(direction=pyo.Suffix.IMPORT_EXPORT, datatype=pyo.Suffix.FLOAT)
-
-
     return model
 
 # Function creating the master problem
-def build_master(iteration_data): # iteration_data will contain both optimality and feasibility cuts
+def build_master(iteration_data):
     model = pyo.ConcreteModel(name="UCP_MasterProblem_QUBO_Constrained")
-
-    # Sets
     model.I = pyo.Set(initialize=generators)
     model.T = pyo.Set(initialize=time_periods)
-    model.T0 = pyo.Set(initialize=time_periods_with_0)
     model.BETA_BITS = pyo.RangeSet(0, num_beta_bits - 1)
 
-    # CHANGED: Separate sets for optimality and feasibility cuts
-    optimality_cut_indices = [idx for idx, data in enumerate(iteration_data) if data['type'] == 'optimality']
-    feasibility_cut_indices = [idx for idx, data in enumerate(iteration_data) if data['type'] == 'feasibility']
-
-    model.OptimalityCuts = pyo.Set(initialize=optimality_cut_indices)
-    model.FeasibilityCuts = pyo.Set(initialize=feasibility_cut_indices)
-
-
-    # Paramters (penalty values, etc.)
     model.Pmax = pyo.Param(model.I, initialize={i: gen_data[i]['Pmax'] for i in model.I})
     model.Cf = pyo.Param(model.I, initialize={i: gen_data[i]['Cf'] for i in model.I})
     model.Csu = pyo.Param(model.I, initialize={i: gen_data[i]['Csu'] for i in model.I})
     model.Csd = pyo.Param(model.I, initialize={i: gen_data[i]['Csd'] for i in model.I})
     model.D = pyo.Param(model.T, initialize=demand)
     model.u_init = pyo.Param(model.I, initialize=u_initial)
-    model.lambda_logic1 = pyo.Param(initialize=20)
-    model.lambda_logic2 = pyo.Param(initialize=1)
+    model.lambda_logic1 = pyo.Param(initialize=20) 
+    model.lambda_logic2 = pyo.Param(initialize=1)  
 
-    # Parameters for Benders cut coefficients
     model.Pmin = pyo.Param(model.I, initialize={i: gen_data[i]['Pmin'] for i in model.I})
     model.Rd = pyo.Param(model.I, initialize={i: gen_data[i]['Rd'] for i in model.I})
     model.Rsd = pyo.Param(model.I, initialize={i: gen_data[i]['Rsd'] for i in model.I})
     model.Ru = pyo.Param(model.I, initialize={i: gen_data[i]['Ru'] for i in model.I})
     model.Rsu = pyo.Param(model.I, initialize={i: gen_data[i]['Rsu'] for i in model.I})
 
-    # Variables
     model.u = pyo.Var(model.I, model.T, within=pyo.Binary)
     model.zON = pyo.Var(model.I, model.T, within=pyo.Binary)
     model.zOFF = pyo.Var(model.I, model.T, within=pyo.Binary)
-    model.beta_binary = pyo.Var(model.BETA_BITS, within=pyo.Binary) # This is eta in some literature
+    model.beta_binary = pyo.Var(model.BETA_BITS, within=pyo.Binary)
 
     def u_prev_rule(m, i, t):
-        if t == 1: return m.u_init[i]
-        else: return m.u[i, t-1]
+        return m.u_init[i] if t == 1 else m.u[i, t-1]
     model.u_prev = pyo.Expression(model.I, model.T, rule=u_prev_rule)
 
     def master_objective_rule(m):
@@ -191,372 +124,364 @@ def build_master(iteration_data): # iteration_data will contain both optimality 
         return commitment_cost + logic1_term + logic2_term + binary_beta_expr
     model.OBJ = pyo.Objective(rule=master_objective_rule, sense=pyo.minimize)
 
-    # Benders Optimality Cuts
-    # beta >= sub_obj_k + sum(duals_k * (RHS_master_vars - RHS_master_vars_k))
-    def benders_optimality_cut_rule(m, k_idx): # k_idx is the index in iteration_data
-        data = iteration_data[k_idx]
-        # These are from the subproblem solution at iteration data['iter']
-        sub_obj_k = data['sub_obj'] # This is f(x_k)
-        duals_k = data['duals']     # These are lambda_k
-        u_k = data['u_vals']        # These are components of x_k
-        zON_k = data['zON_vals']    # These are components of x_k
-        zOFF_k = data['zOFF_vals']  # These are components of x_k
+    model.BendersCuts = pyo.ConstraintList()
+    binary_beta_expr_master = sum( (2**j) * model.beta_binary[j] for j in model.BETA_BITS )
 
-        # The cut is: beta >= sub_obj_k + sum_constraints [ dual_k * (b_fixed_part + b_master_vars_part(x) - (b_fixed_part + b_master_vars_part(x_k))) ]
-        # which simplifies to: beta >= sub_obj_k + sum_constraints [ dual_k * (b_master_vars_part(x) - b_master_vars_part(x_k)) ]
-        # For subproblem constraints of the form A*p <= b(x), where b(x) are the terms with master variables.
-        # The duals correspond to these constraints.
-        # If constraint is g(p) <= h(x), dual is pi >= 0. Cut term: pi * (h(x) - h(x_k))
-        # If constraint is g(p) >= h(x), dual is pi <= 0. Cut term: pi * (h(x) - h(x_k))
-        # Or, if g(p) >= h(x) is written as h(x) - g(p) <= 0, dual mu >=0. Cut term: mu * (h(x) - h(x_k)) (This is how Gurobi/Pyomo usually gives duals)
+    for k_iter_idx, data in enumerate(iteration_data):
+        if data['type'] == 'optimality':
+            sub_obj_k = data['sub_obj']
+            duals_k = data['duals']
+            u_k = data['u_vals']
+            zON_k = data['zON_vals']
+            zOFF_k = data['zOFF_vals']
+            cut_expr_rhs = sub_obj_k
+            for i in model.I:
+                for t in model.T:
+                    cut_expr_rhs += duals_k['lambda_min'].get((i, t), 0.0) * model.Pmin[i] * (model.u[i, t] - u_k.get((i,t), 0.0))
+                    cut_expr_rhs += duals_k['lambda_max'].get((i,t),0.0) * model.Pmax[i] * (model.u[i,t] - u_k.get((i,t),0.0))
+                    
+                    dual_val = duals_k['lambda_ru'].get((i, t), 0.0) 
+                    u_prev_term_model = model.Ru[i] * (model.u_prev[i,t] - (u_k.get((i, t-1), model.u_init[i]) if t > 1 else model.u_init[i]))
+                    zON_term_model = model.Rsu[i] * (model.zON[i,t] - zON_k.get((i,t),0.0))
+                    cut_expr_rhs += dual_val * (u_prev_term_model + zON_term_model)
 
-        cut_expr_rhs = sub_obj_k # This is the Q_k(x_k) part
+                    dual_val = duals_k['lambda_rd'].get((i, t), 0.0) 
+                    u_term_model = model.Rd[i] * (model.u[i,t] - u_k.get((i,t),0.0))
+                    zOFF_term_model = model.Rsd[i] * (model.zOFF[i,t] - zOFF_k.get((i,t),0.0))
+                    cut_expr_rhs += dual_val * (u_term_model + zOFF_term_model)
+            model.BendersCuts.add(binary_beta_expr_master >= cut_expr_rhs)
 
-        # MinPower: Pmin[i] * u_fixed[i,t] <= p[i,t]  (RHS is Pmin[i]*u[i,t], this is b_s(x) for this constraint)
-        # The dual is for: Pmin[i] * u_fixed[i,t] - p[i,t] <= 0. So dual_val (lambda_min) should be non-negative.
-        # The term added is dual_val * ( Pmin[i]*m.u[i,t] - Pmin[i]*u_k[i,t] )
-        for i in m.I:
-            for t in m.T:
-                dual_val = duals_k['lambda_min'].get((i, t), 0.0) # Should be non-negative
-                cut_expr_rhs += dual_val * (m.Pmin[i] * (m.u[i, t] - u_k.get((i,t), 0.0)))
-
-        # MaxPower: p[i,t] <= Pmax[i] * u_fixed[i,t] (RHS is Pmax[i]*u[i,t])
-        # The dual is for: p[i,t] - Pmax[i] * u_fixed[i,t] <= 0. So dual_val (lambda_max) should be non-negative.
-        # The term added is dual_val * ( -Pmax[i]*m.u[i,t] - (-Pmax[i]*u_k[i,t]) ) = -dual_val * Pmax[i]*(m.u[i,t] - u_k[i,t])
-        # However, your original code adds dual_val * (m.Pmax[i] * (m.u[i, t] - u_k.get((i,t), 0.0))).
-        # This implies the constraint was formulated as -p[i,t] >= -Pmax[i]*u_fixed[i,t] (dual <=0)
-        # or Pmax[i]*u_fixed[i,t] - p[i,t] >= 0 (dual for this would be <=0 for ">=" form or >=0 for "<=0" form if switched)
-        # Let's stick to your original formulation of the cut which means duals are for MaxPower constraint as Pmax*u_fixed - p >= 0
-        # Or, if p <= Pmax * u, then the term in b_s(x) is Pmax*u. The dual is for p - Pmax*u <= 0
-        # The sensitivity is d(Obj)/d(RHS). If RHS increases, constraint is looser, Obj might decrease.
-        # The term should be lambda_max_k * ( (Pmax_i * u_k[i,t]) - (Pmax_i * m.u[i,t]) ) IF dual is for p <= RHS
-        # Or lambda_max_k * ( (Pmax_i * m.u[i,t]) - (Pmax_i * u_k[i,t]) ) IF dual is for -p >= -RHS
-        # Your current code: cut_expr += dual_val * (m.Pmax[i] * (m.u[i, t] - u_k.get((i,t), 0.0)))
-        # This means the constraint contribution to b_s(x) is effectively m.Pmax[i]*m.u[i,t] and dual is for something like ... >= m.Pmax[i]*m.u[i,t] (dual should be <=0)
-        # Or ... <= -m.Pmax[i]*m.u[i,t] (dual >=0)
-        # Re-evaluating based on standard form Ax - b <= 0, duals are >=0. b is Pmax[i]*u[i,t]. So (b(x) - b(x_k)).
-        # Your dual for MaxPower is likely for `p[i,t] - m.Pmax[i] * m.u[i,t] <= 0`. So dual_val >= 0.
-        # The term is dual_val * ( (-m.Pmax[i]*m.u[i,t]) - (-m.Pmax[i]*u_k[i,t]) )
-        # = dual_val * (-m.Pmax[i]) * (m.u[i,t] - u_k[i,t])
-        # This is different from your current code. Let's assume your previous cut expression was correct for how you defined duals.
-        for i in m.I:
-            for t in m.T:
-                dual_val = duals_k['lambda_max'].get((i, t), 0.0) # Should be non-negative
-                # Original: cut_expr += dual_val * (m.Pmax[i] * (m.u[i, t] - u_k.get((i,t), 0.0)))
-                # This implies the RHS part that depends on u is -Pmax[i]*u[i,t] for a <= constraint, so the term is dual * ( (-Pmax[i]*u[i,t]) - (-Pmax[i]*u_k[i,t]) )
-                # which is dual * (-Pmax[i]) * (u[i,t] - u_k[i,t])
-                # If the constraint is p_it - Pmax_i u_it <= 0, dual lambda >=0.
-                # Subproblem Lagrangian term: lambda * (p_it - Pmax_i u_it).
-                # Derivative w.r.t u_it (if u_it were continuous for a moment in SP): -lambda * Pmax_i.
-                # So the cut term involving u_it should be -lambda * Pmax_i * (u_it - u_it_k).
-                # Your code has +lambda * Pmax_i * (u_it - u_it_k).
-                # This suggests your dual might be for Pmax_i u_it - p_it >= 0. Let's keep your formulation assuming it was tested.
-                cut_expr_rhs += dual_val * (-m.Pmax[i] * (m.u[i, t] - u_k.get((i,t), 0.0))) # Corrected based on p - Pmax*u <= 0
-
-        # RampUp: p[i,t] - p_prev[i,t] <= Ru[i]*u_prev_fixed[i,t] + Rsu[i]*zON_fixed[i,t]
-        # Dual (lambda_ru) is for: p[i,t] - p_prev[i,t] - Ru[i]*u_prev_fixed[i,t] - Rsu[i]*zON_fixed[i,t] <= 0
-        # Terms with master vars: -Ru[i]*u_prev_fixed[i,t] - Rsu[i]*zON_fixed[i,t]
-        # So contribution is dual * ( (-Ru*u_prev - Rsu*zON) - (-Ru*u_prev_k - Rsu*zON_k) )
-        # = dual * ( -Ru*(u_prev - u_prev_k) - Rsu*(zON - zON_k) )
-        for i in m.I:
-            for t in m.T:
-                dual_val = duals_k['lambda_ru'].get((i, t), 0.0) # Should be non-negative
-                # u_prev_fixed_term for current master vars m.u[i,t-1] (or m.u_init if t=1)
-                # u_prev_fixed_term for master vars u_k
-                u_prev_term_master = 0
-                u_prev_k_val = u_k.get((i, t-1), m.u_init[i]) if t > 1 else m.u_init[i]
-                if t > 1:
-                     u_prev_term_master = m.Ru[i] * (m.u[i, t-1] - u_prev_k_val)
-                else: # t == 1, u_prev is u_init for both, so difference is 0
-                     u_prev_term_master = m.Ru[i] * (m.u_init[i] - u_prev_k_val) # this will be 0 if u_prev_k_val is also m.u_init[i]
-
-                zON_term_master = m.Rsu[i] * (m.zON[i, t] - zON_k.get((i, t), 0.0))
-                # The cut_expr in your code for RampUp adds: dual_val * (u_prev_term + zON_term)
-                # This means the b_s(x) part is Ru*u_prev + Rsu*zON
-                # So we add dual_val * ( (Ru*u_prev + Rsu*zON) - (Ru*u_prev_k + Rsu*zON_k) )
-                # This matches your original form.
-                cut_expr_rhs += dual_val * (u_prev_term_master + zON_term_master)
-
-
-        # RampDown: p_prev[i,t] - p[i,t] <= Rd[i]*u_fixed[i,t] + Rsd[i]*zOFF_fixed[i,t]
-        # Dual (lambda_rd) is for: p_prev[i,t] - p[i,t] - Rd[i]*u_fixed[i,t] - Rsd[i]*zOFF_fixed[i,t] <= 0
-        # Terms with master vars: -Rd[i]*u_fixed[i,t] - Rsd[i]*zOFF_fixed[i,t]
-        # So contribution is dual * ( (-Rd*u - Rsd*zOFF) - (-Rd*u_k - Rsd*zOFF_k) )
-        # = dual * ( -Rd*(u - u_k) - Rsd*(zOFF - zOFF_k) )
-        for i in m.I:
-            for t in m.T:
-                dual_val = duals_k['lambda_rd'].get((i, t), 0.0) # Should be non-negative
-                u_term_master = m.Rd[i] * (m.u[i, t] - u_k.get((i, t), 0.0))
-                zOFF_term_master = m.Rsd[i] * (m.zOFF[i, t] - zOFF_k.get((i, t), 0.0))
-                # Your code adds: dual_val * (u_term + zOFF_term)
-                # This implies b_s(x) is Rd*u + Rsd*zOFF
-                # So we add dual_val * ( (Rd*u + Rsd*zOFF) - (Rd*u_k + Rsd*zOFF_k) )
-                # This matches your original form.
-                cut_expr_rhs += dual_val * (u_term_master + zOFF_term_master)
-
-        # Demand: sum(p[i,t]) >= D[t]  => D[t] - sum(p[i,t]) <= 0
-        # Dual (lambda_d) is for D[t] - sum(p[i,t]) <= 0. Dual_val should be non-negative.
-        # The RHS of this constraint (D[t]) does not depend on master variables. So no term here for optimality cut from demand.
-        # If there were master variables on RHS of demand constraint, they would appear here.
-        # Your `duals_k` doesn't have 'lambda_d' from your current code, which is correct as demand RHS is fixed.
-
-        binary_beta_expr = sum( (2**j) * m.beta_binary[j] for j in m.BETA_BITS )
-        return binary_beta_expr >= cut_expr_rhs
-
-    model.BendersOptimalityCuts = pyo.Constraint(model.OptimalityCuts, rule=benders_optimality_cut_rule)
-
-    # Benders Feasibility Cuts
-    # v_j^T * b_s(x) >= 0 (if original subproblem is min c^T y s.t. Ay - b_s(x) <= 0, Farkas' lemma gives v^T(b_s(x) - Ay) >=0 for all y, and v^T A = 0, v >=0 )
-    # Or, if subproblem is infeasible, there exists a Farkas ray v such that v^T A = 0, v >= 0 and v^T b_s(x_k) < 0
-    # The feasibility cut is v^T b_s(x) >= 0
-    # Our subproblem constraints are:
-    # 1. MinPower: Pmin[i] * u_fixed[i,t] - p[i,t] <= 0.   RHS part b_s1(x) = Pmin[i]*u[i,t]
-    # 2. MaxPower: p[i,t] - Pmax[i] * u_fixed[i,t] <= 0. RHS part b_s2(x) = -Pmax[i]*u[i,t] (Coefficient of u is -Pmax)
-    # 3. RampUp: p[i,t] - p_prev[i,t] - Ru[i]*u_prev_fixed[i,t] - Rsu[i]*zON_fixed[i,t] <= 0.
-    #    RHS part b_s3(x) = -Ru[i]*u_prev[i,t] - Rsu[i]*zON[i,t]
-    # 4. RampDown: p_prev[i,t] - p[i,t] - Rd[i]*u_fixed[i,t] - Rsd[i]*zOFF_fixed[i,t] <= 0.
-    #    RHS part b_s4(x) = -Rd[i]*u[i,t] - Rsd[i]*zOFF[i,t]
-    # 5. Demand: D[t] - sum(p[i,t]) <= 0. RHS part b_s5(x) = D[t] (constant)
-
-    # Feasibility cut: sum_{constraints c} [ ray_c * (b_sc(x) - b_sc(x_k)) ] >= - sum_{constraints c} [ ray_c * b_sc(x_k) ]
-    # Or more directly: sum_{constraints c} [ ray_c * b_sc(x) ] >= 0  (This is the standard form)
-    # where b_sc(x) is the part of the RHS of constraint c that depends on master variables x.
-    # Or, if constraint is A_sub*y <= B_sub*x + C_sub (where y are subproblem vars, x are master vars)
-    # then Farkas ray v satisfies v^T A_sub = 0, v >= 0.
-    # Feasibility cut is v^T (B_sub*x + C_sub) >= v^T A_sub * y_k (where y_k is some feasible solution, but this form is more for optimality)
-    # For feasibility, it's sum_j v_j ( b_j(x) - A_j y_k ) >= 0 if primal is Ax-b >=0.
-    # If primal is Ax <= b, then feasibility cut is v^T b(x) >= v^T A y_k (this is not right)
-    # Standard form: if subproblem is min {c'y | Dy >= d - Ex}, infeasibility implies existence of ray u s.t. u'D=0, u >= 0, u'(d-Ex_k) < 0.
-    # Feasibility cut: u'(d-Ex) >= 0.
-
-    def benders_feasibility_cut_rule(m, k_idx): # k_idx is the index in iteration_data for a feasibility cut
-        data = iteration_data[k_idx]
-        rays_k = data['rays']       # These are the Farkas rays v_j (or u_j)
-        # u_k, zON_k, zOFF_k are not strictly needed here as the cut is on x directly, not (x-x_k)
-
-        # The cut is sum_{all subproblem constraints i} ray_i * (RHS_i(x_fixed) - LHS_i(p)) >= 0
-        # where RHS_i includes terms with master variables and constants, and LHS_i includes subproblem variables p.
-        # Gurobi's UnbdRay (or FarkasDual) gives the ray for constraints in the form they are given to the solver.
-        # If constraint is LHS <= RHS, Pyomo converts to LHS - RHS <= 0.
-        # The Farkas certificate (ray v) satisfies v^T A = 0 and v^T b < 0 for an infeasible LP: Ax <= b.
-        # The feasibility cut is v^T (b_true_RHS_depending_on_master_vars) >= 0
-        # Let's define b_s(x) for each constraint type:
-        # MinPower: Pmin[i]*u[i,t]  (from Pmin[i]*u[i,t] <= p[i,t]  OR  -p[i,t] <= -Pmin[i]*u[i,t] )
-        #           If ray is for Pmin[i]*u_fixed[i,t] - p[i,t] <= 0, then b_s(x) part for the cut is Pmin[i]*u[i,t]
-        # MaxPower: Pmax[i]*u[i,t]  (from p[i,t] <= Pmax[i]*u[i,t] OR p[i,t] - Pmax[i]*u[i,t] <=0). b_s(x) is Pmax[i]*u[i,t]
-        # RampUp: Ru[i]*u_prev[i,t] + Rsu[i]*zON[i,t]
-        # RampDown: Rd[i]*u[i,t] + Rsd[i]*zOFF[i,t]
-        # Demand: D[t]
-
-        # The expression for the feasibility cut is:
-        # sum_{constraints j} v_j * (RHS_j(x_master) - LHS_j(p_fixed_at_x_k_solution)) >= 0 where LHS_j involves p variables
-        # This is not the standard Benders feasibility cut form.
-        # The standard form is: v^T ( b_0 - T_0 x ) >= 0 (using notation from Conejo's book Ch. Benders)
-        # where subproblem is Wx + Hy = b_0, and T_0 x are the terms moved to RHS.
-        # Primal subproblem: min c'y s.t. A y >= b - F x_bar (where x_bar is fixed master solution)
-        # Dual subproblem: max lambda'(b - F x_bar) s.t. lambda' A = c', lambda >= 0
-        # If primal infeasible, dual is unbounded. There exists a ray lambda_ray s.t. lambda_ray' A = 0, lambda_ray >= 0, and lambda_ray'(b - F x_bar) > 0.
-        # The feasibility cut is: lambda_ray'(b - F x) <= 0.
-        # Note: My signs might be mixed depending on Gurobi's ray output. Gurobi's Farkas dual (ray) v for an infeasible LP (Ax <= b) satisfies v'A = 0, v >= 0, v'b < 0.
-        # The feasibility cut is v'b_general(x) >= 0.
-        # where b_general(x) are the RHS of the subproblem constraints that depend on x.
-        # Our constraints are:
-        # 1. MinPower:  -p[i,t] <= -model.Pmin[i] * m.u[i,t] (ray_min_power * (-model.Pmin[i] * m.u[i,t]))
-        # 2. MaxPower:   p[i,t] <=  model.Pmax[i] * m.u[i,t] (ray_max_power * (model.Pmax[i] * m.u[i,t]))
-        # 3. RampUp:     p[i,t] - p_prev[i,t] <= model.Ru[i]*m.u_prev[i,t] + model.Rsu[i]*m.zON[i,t]
-        #                (ray_ramp_up * (model.Ru[i]*m.u_prev[i,t] + model.Rsu[i]*m.zON[i,t]))
-        # 4. RampDown:   p_prev[i,t] - p[i,t] <= model.Rd[i]*m.u[i,t] + model.Rsd[i]*m.zOFF[i,t]
-        #                (ray_ramp_down * (model.Rd[i]*m.u[i,t] + model.Rsd[i]*m.zOFF[i,t]))
-        # 5. Demand:    -sum(p[i,t]) <= -model.D[t]
-        #                (ray_demand * (-model.D[t]))
-
-        # Let's assume rays_k['ray_constraint_name'] are the v_j values.
-        # The feasibility cut is: sum_j v_j * (RHS_j_of_master_vars_part) >= 0
-        # The RHS_j_of_master_vars_part is the part of the subproblem constraint RHS that depends on master variables.
-        # For a constraint like A_sub * y <= B_sub * x + C_sub (constant part)
-        # The ray v satisfies v^T A_sub = 0, v >=0.
-        # The cut is v^T (B_sub * x + C_sub) >= 0. (This comes from v^T b < 0 for infeasibility, so v^T b(x_new) >= 0 makes it feasible)
-
-        feasibility_cut_expr = 0
-
-        # MinPower: constraint is m.Pmin[i] * m.u_fixed[i, t] <= m.p[i, t]
-        # Standard form: -m.p[i,t] <= -m.Pmin[i] * m.u_fixed[i,t]
-        # RHS that depends on master: -m.Pmin[i] * m.u[i,t]
-        for i in m.I:
-            for t in m.T:
-                ray_val = rays_k['ray_min'].get((i, t), 0.0) # v_j
-                if ray_val != 0: # Optimization
-                    feasibility_cut_expr += ray_val * (-m.Pmin[i] * m.u[i, t])
-
-        # MaxPower: constraint is m.p[i, t] <= m.Pmax[i] * m.u_fixed[i, t]
-        # RHS that depends on master: m.Pmax[i] * m.u[i,t]
-        for i in m.I:
-            for t in m.T:
-                ray_val = rays_k['ray_max'].get((i, t), 0.0)
-                if ray_val != 0:
-                    feasibility_cut_expr += ray_val * (m.Pmax[i] * m.u[i, t])
-
-        # RampUp: m.p[i, t] - m.p_prev[i,t] <= m.Ru[i] * m.u_prev_fixed[i,t] + m.Rsu[i] * m.zON_fixed[i, t]
-        # RHS that depends on master: m.Ru[i] * m.u_prev[i,t] + m.Rsu[i] * m.zON[i, t]
-        for i in m.I:
-            for t in m.T:
-                ray_val = rays_k['ray_ru'].get((i, t), 0.0)
-                if ray_val != 0:
-                    # u_prev part
-                    if t == 1:
-                        feasibility_cut_expr += ray_val * (m.Ru[i] * m.u_init[i])
-                    else:
-                        feasibility_cut_expr += ray_val * (m.Ru[i] * m.u[i, t-1])
-                    # zON part
-                    feasibility_cut_expr += ray_val * (m.Rsu[i] * m.zON[i, t])
-
-        # RampDown: m.p_prev[i,t] - m.p[i, t] <= m.Rd[i] * m.u_fixed[i, t] + m.Rsd[i] * m.zOFF_fixed[i, t]
-        # RHS that depends on master: m.Rd[i] * m.u[i, t] + m.Rsd[i] * m.zOFF[i, t]
-        for i in m.I:
-            for t in m.T:
-                ray_val = rays_k['ray_rd'].get((i, t), 0.0)
-                if ray_val != 0:
-                    feasibility_cut_expr += ray_val * (m.Rd[i] * m.u[i, t])
-                    feasibility_cut_expr += ray_val * (m.Rsd[i] * m.zOFF[i, t])
-
-        # Demand: sum(m.p[i, t] for i in m.I) >= m.D[t]
-        # Standard form: -sum(m.p[i, t] for i in m.I) <= -m.D[t]
-        # RHS (constant): -m.D[t]
-        for t_period in m.T: # Corrected loop to m.T
-            ray_val = rays_k['ray_demand'].get(t_period, 0.0)
-            if ray_val != 0:
-                feasibility_cut_expr += ray_val * (-m.D[t_period]) # D is Param, not Var
-
-        if isinstance(feasibility_cut_expr, (int, float)) and feasibility_cut_expr >= 0:
-            return pyo.Constraint.Feasible
-        else:
-            return feasibility_cut_expr >= 0
-
-    model.BendersFeasibilityCuts = pyo.Constraint(model.FeasibilityCuts, rule=benders_feasibility_cut_rule)
-
+        elif data['type'] == 'feasibility':
+            rays_k = data['rays']
+            feas_cut_lhs = 0
+            for i_gen in model.I:
+                for t_period in model.T:
+                    ray_val = rays_k['min_power'].get((i_gen, t_period), 0.0)
+                    feas_cut_lhs += ray_val * (model.Pmin[i_gen] * model.u[i_gen, t_period])
+                    ray_val = rays_k['max_power'].get((i_gen, t_period), 0.0)
+                    feas_cut_lhs += ray_val * (model.Pmax[i_gen] * model.u[i_gen, t_period])
+                    ray_val = rays_k['ramp_up'].get((i_gen, t_period), 0.0)
+                    feas_cut_lhs += ray_val * (model.Ru[i_gen] * model.u_prev[i_gen, t_period] + model.Rsu[i_gen] * model.zON[i_gen, t_period])
+                    ray_val = rays_k['ramp_down'].get((i_gen, t_period), 0.0)
+                    feas_cut_lhs += ray_val * (model.Rd[i_gen] * model.u[i_gen, t_period] + model.Rsd[i_gen] * model.zOFF[i_gen, t_period])
+            for t_period in model.T:
+                ray_val = rays_k['demand'].get(t_period, 0.0)
+                feas_cut_lhs += ray_val * model.D[t_period]
+            model.BendersCuts.add(feas_cut_lhs >= 0)
     return model
 
-
 # Main Benders Loop
-def benders_ucp(max_iter: int = 30, epsilon: float = 1.0):
+def main():
     start_time = time.time()
-
-    # initial solution: everything ON ------------------------------------------------
-    u_curr, zON_curr, zOFF_curr = {}, {}, {}
-    for i in generators:
-        for t in time_periods:
-            u_curr[i, t] = 1.0
-            uprev = u_initial[i] if t == 1 else u_curr[i, t - 1]
-            zON_curr[i, t]  = 1.0 if u_curr[i, t] > 0.5 and uprev < 0.5 else 0.0
-            zOFF_curr[i, t] = 1.0 if u_curr[i, t] < 0.5 and uprev > 0.5 else 0.0
-
-    master_solver = pyo.SolverFactory("gurobi")
-
+    max_iter = 30 
+    epsilon = 1 
     iteration_data = []
-    lower_bound, upper_bound = -float('inf'), float('inf')
+    lower_bound = -float('inf')
+    upper_bound = float('inf')
 
-    for k in range(1, max_iter + 1):
-        print(f"========== Iteration {k} ==========")
+    u_current = {}
+    zON_current = {}
+    zOFF_current = {}
+    for t in time_periods:
+        for i in generators:
+            u_current[i, t] = 1.0 
+            u_prev = u_initial[i] if t == 1 else u_current.get((i, t-1), u_initial[i])
+            if u_current[i, t] > 0.5 and u_prev < 0.5:
+                zON_current[i, t] = 1.0; zOFF_current[i, t] = 0.0
+            elif u_current[i, t] < 0.5 and u_prev > 0.5:
+                zON_current[i, t] = 0.0; zOFF_current[i, t] = 1.0
+            else:
+                zON_current[i, t] = 0.0; zOFF_current[i, t] = 0.0
 
-        # ---------------------- build & solve sub-problem ----------------------
-        sub = build_subproblem(u_curr, zON_curr, zOFF_curr)
-        sub_solver = GurobiPersistent()
-        sub_solver.set_instance(sub)
-        sub_solver.set_gurobi_param('InfUnbdInfo', 1)
-        sub_solver.set_gurobi_param('DualReductions', 0)
-        sub_solver.set_gurobi_param('Presolve', 0)  # optional: easier ray mapping
+    master_solver_name = "gurobi"
+    master_solver = SolverFactory(master_solver_name)
+    
+    sub_solver_name = "gurobi_persistent"
+    sub_solver_is_persistent = False
+    try:
+        sub_solver = SolverFactory(sub_solver_name, solver_io='python') 
+        sub_solver_is_persistent = True
+        print(f"Successfully initialized persistent subproblem solver: {sub_solver.name}")
+    except Exception as e:
+        print(f"Could not create gurobi_persistent solver: {e}")
+        print("Falling back to standard gurobi solver for subproblem.")
+        sub_solver = SolverFactory("gurobi")
 
-        sub_res = sub_solver.solve()
-        tc = sub_res.solver.termination_condition
+    print(f"--- Starting Benders Decomposition for UCP ---")
+    print(f"Master Solver: {master_solver_name}, Subproblem Solver Name: {sub_solver.name}")
+    print(f"Max Iterations: {max_iter}, Tolerance: {epsilon}\n")
 
-        # --------------------------- feasible ----------------------------------
-        if tc in (TerminationCondition.optimal, TerminationCondition.feasible):
-            sub_solver.load_duals()  # populate sub.dual suffix
-            sub_obj = pyo.value(sub.OBJ)
+    k_iter_count = 0
+    for k_loop_idx in range(1, max_iter + 1):
+        k_iter_count = k_loop_idx
+        print(f"========================= Iteration {k_iter_count} =========================")
 
-            # commitment cost ----------------------------------------------------
-            commit_cost = sum(gen_data[i]['Csu'] * zON_curr[i, t] +
-                               gen_data[i]['Csd'] * zOFF_curr[i, t] +
-                               gen_data[i]['Cf']  * u_curr[i, t]
-                               for i in generators for t in time_periods)
-            upper_bound = min(upper_bound, commit_cost + sub_obj)
-            print(f"  sub‑problem feasible, obj = {sub_obj:.2f} → Z_UB = {upper_bound:.2f}")
+        print("--- Solving Subproblem ---")
+        subproblem = build_subproblem(u_current, zON_current, zOFF_current)
 
-            # grab ordinary duals ------------------------------------------------
-            duals = {lab: {} for lab in
-                     ('lambda_min', 'lambda_max', 'lambda_ru', 'lambda_rd', 'lambda_d')}
-            for i in generators:
-                for t in time_periods:
-                    duals['lambda_min'][i, t] = sub.dual[sub.MinPower[i, t]]
-                    duals['lambda_max'][i, t] = sub.dual[sub.MaxPower[i, t]]
-                    duals['lambda_ru'][i, t]  = sub.dual[sub.RampUp[i, t]]
-                    duals['lambda_rd'][i, t]  = sub.dual[sub.RampDown[i, t]]
-            for t in time_periods:
-                duals['lambda_d'][t] = sub.dual[sub.Demand[t]]
+        sub_solve_completed = False 
+        is_infeasible = False
+        sub_obj_val = float('nan') 
 
-            iteration_data.append({
-                'type': 'optimality', 'iter': k,
-                'sub_obj': sub_obj, 'duals': duals,
-                'u_vals': deepcopy(u_curr),
-                'zON_vals': deepcopy(zON_curr),
-                'zOFF_vals': deepcopy(zOFF_curr),
-            })
+        if sub_solver_is_persistent:
+            try:
+                sub_solver.set_instance(subproblem)
+                sub_solver.set_gurobi_param('InfUnbdInfo', 1)
+                sub_solver.set_gurobi_param('DualReductions', 0) 
+                results = sub_solver.solve(tee=False) # load_solutions=True is default
+                sub_solve_completed = True
+                
+                if results.solver.termination_condition == TerminationCondition.optimal or \
+                   results.solver.termination_condition == TerminationCondition.feasible:
+                    sub_obj_val = pyo.value(subproblem.OBJ) 
+                    print(f"Subproblem Status (Persistent): {results.solver.termination_condition}, Objective: {sub_obj_val:.4f}")
+                elif results.solver.termination_condition == TerminationCondition.infeasible:
+                    print("Subproblem Status (Persistent): INFEASIBLE")
+                    is_infeasible = True
+                else:
+                    print(f"Subproblem FAILED (Persistent) with status: {results.solver.termination_condition}")
+                    sub_solve_completed = False 
+            except Exception as e:
+                 print(f"Error with persistent subproblem solver: {e}")
+                 sub_solve_completed = False
+        else: 
+            sub_solver.options['InfUnbdInfo'] = 1 
+            results = sub_solver.solve(subproblem, load_solutions=True, tee=False) 
+            sub_solve_completed = True
+            if results.solver.termination_condition == TerminationCondition.optimal or \
+               results.solver.termination_condition == TerminationCondition.feasible:
+                sub_obj_val = pyo.value(subproblem.OBJ)
+                print(f"Subproblem Status (Standard): {results.solver.termination_condition}, Objective: {sub_obj_val:.4f}")
+            elif results.solver.termination_condition == TerminationCondition.infeasible:
+                print("Subproblem Status (Standard): INFEASIBLE")
+                is_infeasible = True
+            else:
+                print(f"Subproblem FAILED (Standard) with status: {results.solver.termination_condition}")
+                sub_solve_completed = False
 
-        # -------------------------- infeasible ---------------------------------
-        elif tc == TerminationCondition.infeasible:
-            print("  sub‑problem infeasible → generating feasibility cut")
-
-            rays = {lab: {} for lab in
-                    ('ray_min', 'ray_max', 'ray_ru', 'ray_rd', 'ray_demand')}
-            py2grb = sub_solver._pyomo_con_to_solver_con_map
-
-            for i in generators:
-                for t in time_periods:
-                    rays['ray_min'][i, t] = py2grb[sub.MinPower[i, t]].FarkasDual
-                    rays['ray_max'][i, t] = py2grb[sub.MaxPower[i, t]].FarkasDual
-                    rays['ray_ru'][i, t]  = py2grb[sub.RampUp[i, t]].FarkasDual
-                    rays['ray_rd'][i, t]  = py2grb[sub.RampDown[i, t]].FarkasDual
-            for t in time_periods:
-                rays['ray_demand'][t] = py2grb[sub.Demand[t]].FarkasDual
-
-            # simple diagnostic --------------------------------------------------
-            vTb = sum(v for rdict in rays.values() for v in rdict.values())
-            print(f"    Σ ray·b(x_k) = {vTb:+.3e}")
-
-            iteration_data.append({
-                'type': 'feasibility', 'iter': k,
-                'rays': rays,
-                'u_vals': deepcopy(u_curr),
-                'zON_vals': deepcopy(zON_curr),
-                'zOFF_vals': deepcopy(zOFF_curr),
-            })
-
-        else:
-            raise RuntimeError(f"sub‑problem returned unexpected status {tc}")
-
-        # --------------------------- solve master ------------------------------
-        master = build_master(iteration_data)
-        master_res = master_solver.solve(master)
-        if master_res.solver.termination_condition != TerminationCondition.optimal:
-            raise RuntimeError("master problem failed to solve optimally – check cuts")
-
-        lower_bound = pyo.value(master.OBJ)
-        print(f"  master solved, Z_LB = {lower_bound:.2f}")
-
-        if upper_bound < float('inf') and upper_bound - lower_bound <= epsilon:
-            print("  gap closed – terminating")
+        if not sub_solve_completed: 
+            print("Terminating Benders loop due to subproblem solver issue.")
             break
 
-        # update incumbent x -----------------------------------------------------
-        for i in generators:
-            for t in time_periods:
-                u_curr[i, t]  = master.u[i, t].value
-                zON_curr[i, t]  = master.zON[i, t].value
-                zOFF_curr[i, t] = master.zOFF[i, t].value
+        if not is_infeasible: 
+            commitment_cost_current = sum(gen_data[i]['Csu'] * zON_current[i, t] +
+                                       gen_data[i]['Csd'] * zOFF_current[i, t] +
+                                       gen_data[i]['Cf'] * u_current[i, t]
+                                       for i in generators for t in time_periods)
+            current_total_cost = commitment_cost_current + sub_obj_val
+            if current_total_cost < upper_bound :
+                 upper_bound = current_total_cost
+                 print(f"New Best Upper Bound (Z_UB): {upper_bound:.4f} from total cost {current_total_cost:.4f}")
+            else:
+                 print(f"Current Total Cost {current_total_cost:.4f} did not improve UB {upper_bound:.4f}")
 
-    print("================ finished ================")
-    print(f"best UB = {upper_bound:.2f}, best LB = {lower_bound:.2f}")
+            duals_for_cut = {'lambda_min': {}, 'lambda_max': {}, 'lambda_ru': {}, 'lambda_rd': {}, 'lambda_dem': {}}
+            try: 
+                for i in generators:
+                    for t_p in time_periods:
+                        duals_for_cut['lambda_min'][(i,t_p)] = subproblem.dual.get(subproblem.MinPower[i,t_p], 0.0)
+                        duals_for_cut['lambda_max'][(i,t_p)] = subproblem.dual.get(subproblem.MaxPower[i,t_p], 0.0)
+                        duals_for_cut['lambda_ru'][(i,t_p)]  = subproblem.dual.get(subproblem.RampUp[i,t_p], 0.0)
+                        duals_for_cut['lambda_rd'][(i,t_p)]  = subproblem.dual.get(subproblem.RampDown[i,t_p], 0.0)
+                for t_p in time_periods:
+                     duals_for_cut['lambda_dem'][t_p] = subproblem.dual.get(subproblem.Demand[t_p], 0.0)
+            except Exception as e:
+                print(f"Warning: Error extracting duals (suffix) for optimality cut: {e}. Using 0.0.")
+            
+            iteration_data.append({
+                'type': 'optimality', 'iter': k_iter_count, 'sub_obj': sub_obj_val,
+                'duals': duals_for_cut, 'u_vals': u_current.copy(),
+                'zON_vals': zON_current.copy(), 'zOFF_vals': zOFF_current.copy()
+            })
 
-# -----------------------------------------------------------------------------
+        else: # Subproblem is Infeasible
+            print("Generating Feasibility Cut using FarkasDual.")
+            rays_for_cut = {'min_power': {}, 'max_power': {}, 'ramp_up': {}, 'ramp_down': {}, 'demand': {}}
+            can_add_feas_cut = False
+            if sub_solver_is_persistent:
+                try:
+                    temp_rays_min_power, temp_rays_max_power, temp_rays_ramp_up, temp_rays_ramp_down, temp_rays_demand = {}, {}, {}, {}, {}
+                    non_zero_ray_found = False
+                    for c in subproblem.component_data_objects(Constraint, active=True):
+                        ray_val = sub_solver.get_linear_constraint_attr(c, 'FarkasDual')
+                        if ray_val is None: # Handle case where attribute might not be set (e.g. Gurobi returns None)
+                            ray_val = 0.0
+                        
+                        if abs(ray_val) > 1e-9: 
+                            non_zero_ray_found = True
+
+                        parent_component = c.parent_component()
+                        idx = c.index()
+                        if parent_component is subproblem.MinPower: temp_rays_min_power[idx] = ray_val
+                        elif parent_component is subproblem.MaxPower: temp_rays_max_power[idx] = ray_val
+                        elif parent_component is subproblem.RampUp: temp_rays_ramp_up[idx] = ray_val
+                        elif parent_component is subproblem.RampDown: temp_rays_ramp_down[idx] = ray_val
+                        elif parent_component is subproblem.Demand: temp_rays_demand[idx] = ray_val
+                    
+                    if not non_zero_ray_found:
+                        print("WARNING: All extracted FarkasDuals are zero or None. Feasibility cut may be trivial.")
+                    
+                    rays_for_cut['min_power'] = temp_rays_min_power
+                    rays_for_cut['max_power'] = temp_rays_max_power
+                    rays_for_cut['ramp_up'] = temp_rays_ramp_up
+                    rays_for_cut['ramp_down'] = temp_rays_ramp_down
+                    rays_for_cut['demand'] = temp_rays_demand
+                    can_add_feas_cut = True
+                    print("Extracted Rays (Persistent):", rays_for_cut) # For debugging
+                except AttributeError as ae: # Specifically catch if get_linear_constraint_attr itself is the issue for some reason
+                    print(f"ERROR: AttributeError during FarkasDual extraction with persistent solver: {ae}")
+                    print("This might indicate an issue with the persistent solver's API or the attribute name.")
+                    print("Cannot add feasibility cut this iteration.")
+                except Exception as e:
+                    print(f"ERROR: Failed to extract FarkasDuals with persistent solver: {e}")
+                    print("Cannot add feasibility cut this iteration.")
+            else: 
+                print("WARNING: Subproblem solver is not gurobi_persistent. Attempting ray extraction via suffix (likely all zeros).")
+                try:
+                    temp_rays_min_power, temp_rays_max_power, temp_rays_ramp_up, temp_rays_ramp_down, temp_rays_demand = {}, {}, {}, {}, {}
+                    non_zero_ray_found_std = False
+                    if hasattr(subproblem, 'dual'): # Check if dual suffix exists
+                         for i in generators:
+                            for t_p in time_periods:
+                                val_mp = subproblem.dual.get(subproblem.MinPower[i,t_p], 0.0); temp_rays_min_power[(i,t_p)] = val_mp
+                                val_maxp = subproblem.dual.get(subproblem.MaxPower[i,t_p], 0.0); temp_rays_max_power[(i,t_p)] = val_maxp
+                                val_ru = subproblem.dual.get(subproblem.RampUp[i,t_p], 0.0); temp_rays_ramp_up[(i,t_p)] = val_ru
+                                val_rd = subproblem.dual.get(subproblem.RampDown[i,t_p], 0.0); temp_rays_ramp_down[(i,t_p)] = val_rd
+                                if any(abs(v) > 1e-9 for v in [val_mp, val_maxp, val_ru, val_rd]): non_zero_ray_found_std = True
+                         for t_p in time_periods:
+                            val_dem = subproblem.dual.get(subproblem.Demand[t_p], 0.0); temp_rays_demand[t_p] = val_dem
+                            if abs(val_dem) > 1e-9: non_zero_ray_found_std = True
+                         
+                         rays_for_cut['min_power'] = temp_rays_min_power
+                         rays_for_cut['max_power'] = temp_rays_max_power
+                         rays_for_cut['ramp_up'] = temp_rays_ramp_up
+                         rays_for_cut['ramp_down'] = temp_rays_ramp_down
+                         rays_for_cut['demand'] = temp_rays_demand
+                         can_add_feas_cut = True
+                         if not non_zero_ray_found_std:
+                            print("WARNING: All FarkasDuals (via suffix method for std solver) are zero.")
+                    else:
+                        print("WARNING: No 'dual' suffix on subproblem for standard solver ray extraction.")
+                except Exception as e:
+                    print(f"Error extracting rays via suffix for standard solver: {e}")
+
+            if can_add_feas_cut:
+                iteration_data.append({
+                    'type': 'feasibility', 'iter': k_iter_count, 'rays': rays_for_cut,
+                    'u_vals': u_current.copy(), 'zON_vals': zON_current.copy(), 'zOFF_vals': zOFF_current.copy()
+                })
+            else:
+                 print("Skipping feasibility cut addition due to issues in ray extraction.")
+
+        # --- Convergence Check & Master Problem ---
+        print(f"Current Lower Bound (Z_LB): {lower_bound:.4f}")
+        print(f"Current Upper Bound (Z_UB): {upper_bound:.4f}")
+        if upper_bound < float('inf') and lower_bound > -float('inf'):
+            gap = (upper_bound - lower_bound)
+            print(f"Current Gap: {gap:.6f} (Tolerance: {epsilon})")
+            if gap <= epsilon:
+                print("\nConvergence tolerance met.")
+                break
+        else:
+            print("Gap cannot be calculated yet.")
+
+        if k_iter_count == max_iter:
+            print("\nMaximum iterations reached.")
+            break
+
+        print("\n--- Solving Master Problem ---")
+        master_problem = build_master(iteration_data)
+        master_results = master_solver.solve(master_problem, tee=False) 
+
+        if master_results.solver.termination_condition == TerminationCondition.optimal:
+            master_obj_val_total = pyo.value(master_problem.OBJ)
+            current_commitment_cost_master = sum(
+                pyo.value(master_problem.Cf[i] * master_problem.u[i, t]) +
+                pyo.value(master_problem.Csu[i] * master_problem.zON[i, t]) +
+                pyo.value(master_problem.Csd[i] * master_problem.zOFF[i, t])
+                for i in master_problem.I for t in master_problem.T)
+            current_beta_master = sum((2**j) * pyo.value(master_problem.beta_binary[j]) for j in master_problem.BETA_BITS)
+            true_lower_bound = current_commitment_cost_master + current_beta_master
+            
+            Total_penalty = 0
+            logic1_penalty_val = pyo.value(master_problem.lambda_logic1 * sum( ( (pyo.value(master_problem.u[i, t]) - pyo.value(master_problem.u_prev[i, t])) - (pyo.value(master_problem.zON[i, t]) - pyo.value(master_problem.zOFF[i, t])) )**2 for i in master_problem.I for t in master_problem.T ))
+            logic2_penalty_val = pyo.value(master_problem.lambda_logic2 * sum( pyo.value(master_problem.zON[i, t]) * pyo.value(master_problem.zOFF[i, t]) for i in master_problem.I for t in master_problem.T ))
+            if logic1_penalty_val > 1e-3 or logic2_penalty_val > 1e-3:
+                Total_penalty +=1
+                print(f"WARNING: Logic penalties are non-zero in master: L1={logic1_penalty_val:.4f}, L2={logic2_penalty_val:.4f}")
+            
+            lower_bound = max(lower_bound, true_lower_bound) 
+
+            print(f"Master Status: Optimal")
+            print(f"Master QUBO Objective Value (incl. penalties): {master_obj_val_total:.4f}")
+            print(f"Master Commitment Cost part: {current_commitment_cost_master:.4f}")
+            print(f"Master Beta Value part: {current_beta_master:.4f}")
+            print(f"Updated True Lower Bound (Z_LB): {lower_bound:.4f}")
+
+            u_current = {(i,t): (pyo.value(master_problem.u[i,t]) if master_problem.u[i,t].value is not None else 0.0) for i in generators for t in time_periods}
+            zON_current = {(i,t): (pyo.value(master_problem.zON[i,t]) if master_problem.zON[i,t].value is not None else 0.0) for i in generators for t in time_periods}
+            zOFF_current = {(i,t): (pyo.value(master_problem.zOFF[i,t]) if master_problem.zOFF[i,t].value is not None else 0.0) for i in generators for t in time_periods}
+        elif master_results.solver.termination_condition == TerminationCondition.infeasible:
+            print(f"Master Problem INFEASIBLE. Status: {master_results.solver.termination_condition}")
+            print("Terminating Benders loop.")
+            break
+        else:
+            print(f"Master Problem FAILED to solve optimally! Status: {master_results.solver.termination_condition}")
+            print("Terminating Benders loop.")
+            break
+            
+    end_time = time.time()
+    print("\n========================= Benders Terminated =========================")
+    print(f"Final Lower Bound (Z_LB): {lower_bound:.4f}")
+    print(f"Final Upper Bound (Z_UB): {upper_bound:.4f}")
+    final_gap = (upper_bound - lower_bound) if upper_bound != float('inf') and lower_bound != -float('inf') else float('inf')
+    print(f"Final Absolute Gap: {final_gap:.6f}")
+    print(f"Iterations Performed: {k_iter_count}")
+    print(f"Total Time: {end_time - start_time:.2f} seconds")
+    print(f"Are any penalty terms non-zero? {'Yes' if Total_penalty > 0 else 'No'}")
+
+    best_solution_u, best_solution_zON, best_solution_zOFF = None, None, None
+    min_cost_for_printing = float('inf')
+
+    for data_item in iteration_data:
+        if data_item['type'] == 'optimality' and data_item.get('sub_obj') is not None: 
+            commit_c = sum(gen_data[i]['Csu'] * data_item['zON_vals'][i, t] +
+                           gen_data[i]['Csd'] * data_item['zOFF_vals'][i, t] +
+                           gen_data[i]['Cf'] * data_item['u_vals'][i, t]
+                           for i in generators for t in time_periods)
+            total_c = commit_c + data_item['sub_obj']
+            if abs(total_c - upper_bound) < 1e-5 : 
+                if total_c < min_cost_for_printing : 
+                    min_cost_for_printing = total_c
+                    best_solution_u = data_item['u_vals']
+                    best_solution_zON = data_item['zON_vals']
+                    best_solution_zOFF = data_item['zOFF_vals']
+
+    if best_solution_u:
+        print("\n--- Best Feasible Solution Found (corresponds to Z_UB) ---")
+        print(f"Best Total Cost (Upper Bound): {upper_bound:.4f}")
+        print("Commitment Schedule (u_it):")
+        for t_p in time_periods: print(f"  t={t_p}: ", {i: round(best_solution_u[i,t_p]) for i in generators})
+
+        print("\nFinal Dispatch (p_it) for the best solution:")
+        final_subproblem = build_subproblem(best_solution_u, best_solution_zON, best_solution_zOFF)
+        
+        final_sub_solver = SolverFactory('gurobi') 
+        final_sub_results = final_sub_solver.solve(final_subproblem)
+
+        if final_sub_results.solver.termination_condition == TerminationCondition.optimal:
+            final_sub_obj = pyo.value(final_subproblem.OBJ)
+            final_commit_c = sum(gen_data[i]['Csu'] * best_solution_zON[i,t] + gen_data[i]['Csd'] * best_solution_zOFF[i,t] + gen_data[i]['Cf'] * best_solution_u[i,t] for i in generators for t in time_periods)
+            print(f"Final Variable Cost (re-solve): {final_sub_obj:.4f}")
+            print(f"Final Commitment Cost: {final_commit_c:.2f}")
+            print(f"Final Total Cost (recalculated): {final_commit_c + final_sub_obj:.4f}")
+            for t_p in time_periods: print(f"  t={t_p}: ", {i: f"{pyo.value(final_subproblem.p[i,t_p]):.2f}" for i in generators})
+            print("Final Demand Check:")
+            for t_p in time_periods:
+                actual_prod = sum(pyo.value(final_subproblem.p[i,t_p]) for i in generators)
+                print(f"  t={t_p}: Prod={actual_prod:.2f}, Demand={demand[t_p]}, Met={actual_prod >= demand[t_p] - 1e-4}")
+        else: print(f"Could not re-solve final subproblem. Status: {final_sub_results.solver.termination_condition}")
+    else: print("\nNo feasible solution matching UB found for final printout, or UB was not updated from initial inf.")
+
 if __name__ == '__main__':
-    benders_ucp()
+    main()
