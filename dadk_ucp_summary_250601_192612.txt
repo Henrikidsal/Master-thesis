@@ -1,0 +1,17 @@
+Benders Decomposition with DADK Master Summary
+===============================================
+Periods: 5, Generators: 3
+Final Lower Bound (Z_LB): 191.0000
+Final Upper Bound (Z_UB): 330.0000
+Final Absolute Gap: 139.0000
+Final Relative Gap: 42.121212%Total Time: 39.73 seconds
+Iterations Performed: 2
+
+Best UB Solution (from iteration 1):
+  Total Cost: 330.0000
+  Commitment Schedule (u_it):
+    t=1: {1: 1, 2: 1, 3: 1}
+    t=2: {1: 1, 2: 1, 3: 1}
+    t=3: {1: 1, 2: 1, 3: 1}
+    t=4: {1: 1, 2: 1, 3: 1}
+    t=5: {1: 1, 2: 1, 3: 1}

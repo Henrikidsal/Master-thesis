@@ -159,15 +159,6 @@ solver = QUBOSolverCPU(
     number_replicas=128,
     number_iterations=10000,
     temperature_sampling=True,
-    #temperature_start=1.030992598e+04,
-    #temperature_end=1.0e+03,
-    #temperature_mode=0,
-    #temperature_interval=5,
-    #offset_increase_rate=4.7578e+03,
-    #pt_temperature_model='Exponential',
-    #pt_replica_exchange_model='Neighbours',
-    #random_seed=42,
-    #scaling_factor=1.0
     scaling_action=ScalingAction.AUTO_SCALING,
 )
 
@@ -200,22 +191,6 @@ for t in range(T):
 stop = timeit.default_timer()
 print('Time: ', stop - start)
 # Uncomment below to display intermediate results
-'''
-print("Optimal solution:")
-print("u (unit on/off):")
-print(u_sol)
-print("zOn (startup decisions):")
-print(zOn_sol)
-print("zOff (shutdown decisions):")
-print(zOff_sol)
-for t in range(1, T+1):
-    print(f"s_{t} (demand slack bits):")
-    print(solution[f's_{t}'].data)
-print("sUp (ramp-up slack bits):")
-print(solution['sUp'].data)
-print("sDown (ramp-down slack bits):")
-print(solution['sDown'].data)
-'''
 
 print("Full QUBO value (with penalties) (from the lowest energy solution):", solution.energy)
 print("The original objective value (from the lowest energy solution):", orig_obj)

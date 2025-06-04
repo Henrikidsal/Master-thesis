@@ -12,7 +12,7 @@ import time
 import math
 
 # Choose the number of time periods wanted:
-Periods = 1
+Periods = 5
 
 # Sets
 generators = [1, 2, 3]
@@ -27,7 +27,7 @@ gen_data = {
 }
 
 # Demand and Reserve Parameters
-demand = {1: 160} # Demand for each time period
+demand = {1: 160, 2: 500, 3: 400, 4: 160, 5: 500} # Demand for each time period
 
 
 # Initial Conditions for T = 0
@@ -35,7 +35,7 @@ u_initial = {1: 0, 2: 0, 3: 1}
 p_initial = {1: 0, 2: 0, 3: 100}
 
 # Number of bits for beta variable
-num_beta_bits = 5
+num_beta_bits = 8
 
 # Function creating the sub problem (LP)
 def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
@@ -118,11 +118,20 @@ def build_master(iteration_data):
 
     def master_objective_rule(m):
         commitment_cost = sum(m.Csu[i] * m.zON[i, t] + m.Csd[i] * m.zOFF[i, t] + m.Cf[i] * m.u[i, t] for i in m.I for t in m.T)
-        logic1_term = m.lambda_logic1 * sum( ( (m.u[i, t] - m.u_prev[i, t]) - (m.zON[i, t] - m.zOFF[i, t]) )**2 for i in m.I for t in m.T )
-        logic2_term = m.lambda_logic2 * sum( m.zON[i, t] * m.zOFF[i, t] for i in m.I for t in m.T )
         binary_beta_expr = sum( (2**j) * m.beta_binary[j] for j in m.BETA_BITS )
-        return commitment_cost + logic1_term + logic2_term + binary_beta_expr
+        return commitment_cost + binary_beta_expr
     model.OBJ = pyo.Objective(rule=master_objective_rule, sense=pyo.minimize)
+
+    def logic1_rule(m, i, t):
+        if t == 1:
+            return m.u[i, t] - m.u_init[i] == m.zON[i, t] - m.zOFF[i, t]
+        else:
+            return m.u[i, t] - m.u_prev[i, t] == m.zON[i, t] - m.zOFF[i, t]
+    model.Logic1 = pyo.Constraint(model.I, model.T, rule=logic1_rule)
+
+    def logic2_rule(m, i, t):
+        return m.zON[i, t] + m.zOFF[i, t] <= 1
+    model.Logic2 = pyo.Constraint(model.I, model.T, rule=logic2_rule)
 
     model.BendersCuts = pyo.ConstraintList()
     binary_beta_expr_master = sum( (2**j) * model.beta_binary[j] for j in model.BETA_BITS )
@@ -401,7 +410,7 @@ def main():
                 pyo.value(master_problem.Csd[i] * master_problem.zOFF[i, t])
                 for i in master_problem.I for t in master_problem.T)
             current_beta_master = sum((2**j) * pyo.value(master_problem.beta_binary[j]) for j in master_problem.BETA_BITS)
-            true_lower_bound = current_commitment_cost_master + current_beta_master
+            true_lower_bound = current_commitment_cost_master + current_beta_master-1
             
             Total_penalty = 0
             logic1_penalty_val = pyo.value(master_problem.lambda_logic1 * sum( ( (pyo.value(master_problem.u[i, t]) - pyo.value(master_problem.u_prev[i, t])) - (pyo.value(master_problem.zON[i, t]) - pyo.value(master_problem.zOFF[i, t])) )**2 for i in master_problem.I for t in master_problem.T ))

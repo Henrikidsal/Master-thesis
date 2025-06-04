@@ -4,8 +4,7 @@
 ##### All variables in the master problem are binary.
 ##### Beta is binary encoded, and can take integer values
 ##### The slack variables in optimality and feasibility cuts are also binary encoded, they can take float valeus with step lenght d.
-##### Feasibility cuts use FarkasDual attributes obtained via gurobi_persistent.
-##### This script uses cold starts for the master problem variables.
+##### FarkasDual attributes obtained via gurobi_persistent are used to create feasibility cuts.
 
 ##### Neccecary imports
 import pyomo.environ as pyo
@@ -142,10 +141,10 @@ def build_master(iteration_data):
     model.Csd = pyo.Param(model.I, initialize={i: gen_data[i]['Csd'] for i in model.I}) # Shut-down cost for each generator
     model.D_param = pyo.Param(model.T, initialize=demand) # Demand for each time period
     model.u_init = pyo.Param(model.I, initialize=u_initial) # Initial state of each generator t=0
-    model.lambda_logic1 = pyo.Param(initialize=20) # Logic 1 penalty term lambda
-    model.lambda_logic2 = pyo.Param(initialize=1)  # Logic 2 penalty term lambda
-    model.lambda_opt_cut = pyo.Param(initialize=5) # Optimality cut penalty term lambda
-    model.lambda_feas_cut = pyo.Param(initialize=1) # Feasibility cut penalty term lambda
+    model.lambda_logic1 = pyo.Param(initialize=20) # Logic 1 penalty term lambda #20
+    model.lambda_logic2 = pyo.Param(initialize=1)  # Logic 2 penalty term lambda #1
+    model.lambda_opt_cut = pyo.Param(initialize=5) # Optimality cut penalty term lambda #1
+    model.lambda_feas_cut = pyo.Param(initialize=1) # Feasibility cut penalty term lambda #5
 
     # Variables
     model.u = pyo.Var(model.I, model.T, within=pyo.Binary) # on/off status

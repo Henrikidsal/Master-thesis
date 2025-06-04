@@ -119,9 +119,6 @@ for t in range(1, T):
         h_down_it = BinPol(); h_down_it.add_term(R_down[i+1]); h_down_it.add_term(-P_max[i+1], ('u', i, t-1)); h_down_it.add_term(P_max[i+1], ('u', i, t))
         qubo.add(h_down_it, -ramp_down_lambda1); qubo.add(h_down_it.power2(), ramp_down_lambda2)
 
-# (Print removed)
-
-# solving
 start = timeit.default_timer()
 solver = QUBOSolverCPU(
     optimization_method='parallel_tempering',

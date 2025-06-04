@@ -1,6 +1,6 @@
-##### This is a script that solves the continous version of the UCP
+##### This is a script that solves the UCP from the Conejo book
 ##### It uses Benders Decomposition, where both master and subproblem are solved using Pyomo, classically
-##### THe logic constraints, both types, are penalty terms
+##### The logic constraints, both types, are penalty terms
 ##### Only benders optimality cuts are constraints.
 ##### The LB could be calculated as only commitment cost + beta, but here its the full QUBO value. It works because logics are never violated.
 
@@ -134,7 +134,7 @@ def build_subproblem(u_fixed_vals, zON_fixed_vals, zOFF_fixed_vals):
 
 # Function creating the master problem
 def build_master(iteration_data):
-    model = pyo.ConcreteModel(name="UCP_MasterProblem_QUBO_Constrained") # Use descriptive name
+    model = pyo.ConcreteModel(name="UCP_MasterProblem_QUBO_Constrained") 
 
     # Sets
     model.I = pyo.Set(initialize=generators)
@@ -175,11 +175,22 @@ def build_master(iteration_data):
     # Objective function
     def master_objective_rule(m):
         commitment_cost = sum(m.Csu[i] * m.zON[i, t] + m.Csd[i] * m.zOFF[i, t] + m.Cf[i] * m.u[i, t] for i in m.I for t in m.T)
-        logic1_term = m.lambda_logic1 * sum( ( (m.u[i, t] - m.u_prev[i, t]) - (m.zON[i, t] - m.zOFF[i, t]) )**2 for i in m.I for t in m.T )
-        logic2_term = m.lambda_logic2 * sum( m.zON[i, t] * m.zOFF[i, t] for i in m.I for t in m.T )
         binary_beta_expr = sum( (2**j) * m.beta_binary[j] for j in m.BETA_BITS )
-        return commitment_cost + logic1_term + logic2_term + binary_beta_expr
+        return commitment_cost + binary_beta_expr
     model.OBJ = pyo.Objective(rule=master_objective_rule, sense=pyo.minimize)
+
+
+    def logic1_rule(m, i, t):
+        if t == 1:
+            return m.u[i, t] - m.u_init[i] == m.zON[i, t] - m.zOFF[i, t]
+        else:
+            return m.u[i, t] - m.u_prev[i, t] == m.zON[i, t] - m.zOFF[i, t]
+    model.Logic1 = pyo.Constraint(model.I, model.T, rule=logic1_rule)
+
+    def logic2_rule(m, i, t):
+        return m.zON[i, t] + m.zOFF[i, t] <= 1
+    model.Logic2 = pyo.Constraint(model.I, model.T, rule=logic2_rule)
+
 
     # Benders Cuts Constraints
     def benders_cut_rule(m, k):

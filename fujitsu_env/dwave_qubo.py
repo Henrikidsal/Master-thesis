@@ -16,10 +16,12 @@ from dwave.system import DWaveSampler
 import joblib
 from datetime import datetime
 
+
 # --- Global Parameters ---
-BETA_BITS = 7
+save_results_to_file=False
+BETA_BITS = 7 #8
 # Choose the number of time periods wanted:
-Periods = 3
+Periods = 3 #5
 # Sets
 generators = [1, 2, 3]
 time_periods = [x for x in range(1, Periods + 1)] # T=3 hours
@@ -32,7 +34,7 @@ gen_data = {
 }
 
 # Demand Parameters from the PDF
-demand = {1: 160, 2: 500, 3: 400}
+demand = {1: 160, 2: 500, 3: 400} # Demand for each time period
 
 # Initial Conditions for time period = 0, from the PDF
 u_initial = {1: 0, 2: 0, 3: 1}
@@ -216,6 +218,7 @@ def build_relaxed_master_pyomo(iteration_data):
     model.Rsu = pyo.Param(model.I, initialize={i: gen_data[i]['Rsu'] for i in model.I})
     model.D_param = pyo.Param(model.T, initialize=demand) # Renamed to avoid conflict
     
+    
     model.u = pyo.Var(model.I, model.T, within=pyo.NonNegativeReals, bounds=(0, 1))
     model.zON = pyo.Var(model.I, model.T, within=pyo.NonNegativeReals, bounds=(0, 1))
     model.zOFF = pyo.Var(model.I, model.T, within=pyo.NonNegativeReals, bounds=(0, 1))
@@ -362,10 +365,13 @@ def check_feasibility_cuts(sample, iteration_data):
                 return False
     return True
 
+  
 def main():
     start_time = time.time()
-    max_iter, epsilon, num_beta_bits = 25, 1.0, BETA_BITS
+    max_iter, epsilon, num_beta_bits = 30, 1.0, BETA_BITS
     iteration_data, lower_bound, upper_bound = [], -float('inf'), float('inf')
+    stagnation_limit   = 10
+    stagnation_counter = 0
     best_ub_solution = None
     u_current, zON_current, zOFF_current = {}, {}, {}
     for t in time_periods:
@@ -400,10 +406,19 @@ def main():
             print(f"Subproblem Status: {results.solver.termination_condition}, Objective: {sub_obj_val:.4f}")
             commitment_cost = sum(gen_data[i]['Csu']*zON_current.get((i,t),0) + gen_data[i]['Csd']*zOFF_current.get((i,t),0) + gen_data[i]['Cf']*u_current.get((i,t),0) for i in generators for t in time_periods)
             current_total_cost = commitment_cost + sub_obj_val
-            if current_total_cost < upper_bound:
+            if current_total_cost < upper_bound - 1e-6:
                 upper_bound = current_total_cost
-                best_ub_solution = {'u_vals': u_current.copy(), 'zON_vals': zON_current.copy(), 'zOFF_vals': zOFF_current.copy(), 'iter': k_iter_count, 'total_cost': upper_bound}
+                best_ub_solution = {
+                    'u_vals': u_current.copy(),
+                    'zON_vals': zON_current.copy(),
+                    'zOFF_vals': zOFF_current.copy(),
+                    'iter': k_iter_count,
+                    'total_cost': upper_bound
+                }
                 print(f"New Best Upper Bound (Z_UB): {upper_bound:.4f}")
+                stagnation_counter = 0  
+            else:
+                stagnation_counter += 1
             duals = {f'lambda_{k}': {idx: subproblem.dual.get(con[idx], 0.0) for idx in con} for k, con in {'min': subproblem.MinPower, 'max': subproblem.MaxPower, 'ru': subproblem.RampUp, 'rd': subproblem.RampDown, 'dem': subproblem.Demand}.items()}
             iteration_data.append({'type': 'optimality', 'sub_obj': sub_obj_val, 'duals': duals, 'u_vals': u_current.copy(), 'zON_vals': zON_current.copy(), 'zOFF_vals': zOFF_current.copy()})
         else:
@@ -417,15 +432,20 @@ def main():
         if k_iter_count == max_iter:
             print("\nMaximum iterations reached."); break
         
+        if stagnation_counter >= stagnation_limit:
+            print(f"\nTerminating: Upper bound unchanged for {stagnation_limit} "
+                  f"consecutive iterations.")
+            break
+        
         print("\n--- 2. Solving Master Problem ")
 
 
         master_bqm = build_master_dwave(iteration_data, num_beta_bits)
         best_feasible_sample, lowest_energy = None, float('inf')
-        for attempt in range(2):
+        for attempt in range(10):
 
             sampler = SimulatedAnnealingSampler()
-            sampleset = sampler.sample(master_bqm, num_reads=50, label=f'HENRIK-UCP-Master-Iter-{k_iter_count}')
+            sampleset = sampler.sample(master_bqm, num_reads=100, label=f'HENRIK-UCP-Master-Iter-{k_iter_count}')
             
             #sampler = LeapHybridBQMSampler(token="token")
             #sampleset = sampler.sample(master_bqm, label=f'HENRIK-UCP-Master-Iter-{k_iter_count}', time_limit=5)
@@ -486,47 +506,88 @@ def main():
     final_gap = (upper_bound - lower_bound) / (abs(upper_bound) + 1e-9) if upper_bound < float('inf') else float('inf')
     print(f"Final Gap: {final_gap:.6f}")
     print(f"Total Time: {end_time - start_time:.2f} seconds")
+
+    print("\n--- Best Feasible Solution Found (corresponds to Z_UB) ---")
+    print(f"Best Total Cost (Upper Bound): {upper_bound:.4f}")
+    print("Commitment Schedule (u_it):")
+    for t in time_periods:
+        print(f"  t={t}: ",
+              {i: round(best_ub_solution['u_vals'][(i, t)]) for i in generators})
+
+    # ► Optional:  re-solve the sub-problem to show dispatch (p_it)
+    final_subproblem = build_subproblem(best_ub_solution['u_vals'],
+                                        best_ub_solution['zON_vals'],
+                                        best_ub_solution['zOFF_vals'])
+    final_solver = SolverFactory("gurobi")
+    final_res = final_solver.solve(final_subproblem)
+
+    if final_res.solver.termination_condition == TerminationCondition.optimal:
+        var_cost = pyo.value(final_subproblem.OBJ)
+        com_cost = sum(gen_data[i]['Csu'] * best_ub_solution['zON_vals'][(i, t)] +
+                       gen_data[i]['Csd'] * best_ub_solution['zOFF_vals'][(i, t)] +
+                       gen_data[i]['Cf']  * best_ub_solution['u_vals'][(i, t)]
+                       for i in generators for t in time_periods)
+
+        print("\nFinal Dispatch (p_it):")
+        for t in time_periods:
+            print(f"  t={t}: ", {i: f"{pyo.value(final_subproblem.p[i, t]):.2f}" for i in generators})
+
+        print("\nCost recap:")
+        print(f"  Commitment cost : {com_cost:.4f}")
+        print(f"  Variable cost   : {var_cost:.4f}")
+        print(f"  Total cost      : {com_cost + var_cost:.4f}")
+
+        # Demand check (sanity)
+        print("\nDemand check:")
+        for t in time_periods:
+            total_prod = sum(pyo.value(final_subproblem.p[i, t]) for i in generators)
+            print(f"  t={t}: produced={total_prod:.2f}  demand={demand[t]}"
+                  f"  met={total_prod >= demand[t] - 1e-4}")
+    else:
+        print("WARNING: Could not re-solve dispatch for the final schedule.")
+
+
     if best_ub_solution:
         print(f"\n--- Best Found Solution (from iteration {best_ub_solution['iter']}) ---")
         print(f"Best Total Cost: {best_ub_solution['total_cost']:.4f}")
         print("Commitment Schedule (u_it):")
-        for t_val in time_periods: # Changed variable name
+        for t_val in time_periods: 
             print(f"  t={t_val}: ", {i: round(best_ub_solution['u_vals'].get((i, t_val), 0)) for i in generators})
     else:
         print("\nNo feasible solution was found during the process.")
         
 
-    now = datetime.now()
-    timestamp = now.strftime("%y%m%d_%H%M%S")
+    if save_results_to_file:
+        now = datetime.now()
+        timestamp = now.strftime("%y%m%d_%H%M%S")
+
+        # Open the file in write mode ("w") to allow writing.
+        with open(f"summarized_data_{timestamp}.txt", "w") as f:
+            # Write the summary statistics
+            f.write(f"Final Lower Bound (Z_LB): {lower_bound:.4f}\n")
+            f.write(f"Final Upper Bound (Z_UB): {upper_bound:.4f}\n")
+            f.write(f"Final Gap: {final_gap:.6f}\n")
+            f.write(f"Total Time: {end_time - start_time:.2f} seconds\n")
+
+            # Check if a solution was found and write its details
+            if best_ub_solution:
+                f.write(f"Best Found Solution (from iteration {best_ub_solution['iter']}):\n")
+                f.write(f"  Best Total Cost: {best_ub_solution['total_cost']:.4f}\n")
+                f.write("  Commitment Schedule (u_it):\n")
+                # Loop through each time period to write the schedule
+                for t_val in time_periods:
+                    # FIX: First, build the inner string with the list comprehension.
+                    # This avoids the nested f-string error.
+                    schedule_line = ', '.join([
+                        f"{i}: {round(best_ub_solution['u_vals'].get((i, t_val), 0))}"
+                        for i in generators
+                    ])
+                    
+                    # Now, write the fully assembled line to the file.
+                    f.write(f"    t={t_val}: {schedule_line}\n")
 
 
-    # Open the file in write mode ("w") to allow writing.
-    with open(f"summarized_data_{timestamp}.txt", "w") as f:
-        # Write the summary statistics
-        f.write(f"Final Lower Bound (Z_LB): {lower_bound:.4f}\n")
-        f.write(f"Final Upper Bound (Z_UB): {upper_bound:.4f}\n")
-        f.write(f"Final Gap: {final_gap:.6f}\n")
-        f.write(f"Total Time: {end_time - start_time:.2f} seconds\n")
-
-        # Check if a solution was found and write its details
-        if best_ub_solution:
-            f.write(f"Best Found Solution (from iteration {best_ub_solution['iter']}):\n")
-            f.write(f"  Best Total Cost: {best_ub_solution['total_cost']:.4f}\n")
-            f.write("  Commitment Schedule (u_it):\n")
-            # Loop through each time period to write the schedule
-            for t_val in time_periods:
-                # FIX: First, build the inner string with the list comprehension.
-                # This avoids the nested f-string error.
-                schedule_line = ', '.join([
-                    f"{i}: {round(best_ub_solution['u_vals'].get((i, t_val), 0))}"
-                    for i in generators
-                ])
-                
-                # Now, write the fully assembled line to the file.
-                f.write(f"    t={t_val}: {schedule_line}\n")
-
-
-    joblib.dump(sampleset_dict, f'sampleset_dict_{timestamp}.pkl')
+        joblib.dump(sampleset_dict, f'sampleset_dict_{timestamp}.pkl')
 
 if __name__ == '__main__':
     main()
