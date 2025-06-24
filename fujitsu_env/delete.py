@@ -39,7 +39,7 @@ def main(iterations, time_periods):
     # --- Global Parameters ---
     save_results_to_file=False
     
-    lambda1, lambda2, lambda3, lambda4 = 110, 40, 10, 50 # Lagrange multipliers for the master problem
+    lambda1, lambda2, lambda3, lambda4 = 1800, 900, 100, 500 # Lagrange multipliers for the master problem
     # Choose the number of time periods wanted:
     Periods = time_periods
     # Sets
@@ -514,7 +514,7 @@ def main(iterations, time_periods):
             sampler = SimulatedAnnealingSampler()
             sampleset = sampler.sample(master_bqm, num_reads=1, num_sweeps=num_iter, label=f'HENRIK-UCP-Master-Iter-{k_iter_count}')
             
-            sampler = LeapHybridBQMSampler(token="token")
+            #sampler = LeapHybridBQMSampler(token="token")
             #sampleset = sampler.sample(master_bqm, label=f'HENRIK-UCP-Master-Iter-{k_iter_count}', time_limit=5)
             
             sampleset_dict[k_iter_count] = sampleset.copy()
@@ -657,21 +657,41 @@ if __name__ == '__main__':
 
 
     df = pd.DataFrame(columns=["number_of_time_periods", "lower_bounds", "upper_bounds", "best_solution", "time_used", "number_of_benders_iterations","number_of_sweeps", "commitment_schedule", "turning_on_schedule", "turning_off_schedule","termination_reason"])
-
-    for _ in range(100):
-        main(iterations=256_000, time_periods=3)
     
-    for _ in range(100):
-        main(iterations=640_000, time_periods=3)
     
-    for _ in range(100):
-        main(iterations=256_000, time_periods=5)
-    
-    for _ in range(100):
-        main(iterations=640_000, time_periods=5)
-    
-    for _ in range(100):
+    for _ in range(30):
         main(iterations=256_000, time_periods=6)
 
     for _ in range(100):
         main(iterations=640_000, time_periods=6)
+    
+
+
+
+
+#number of time periods
+#upper bound in each benders iteration
+#lower bound in each benders iteration
+#final best solution, also final upper bound
+#final lower bound
+#time used
+#number of benders iterations
+#number of sweeps/iterations in each master problem solve
+#commitment schedule, which generators are on/off in each time period
+#turning on schedule
+#turning off schedule
+
+#with 3 time periods
+#100 with 50_000 iter
+#100 with 1_000_000 iter
+#100 with 5_000_000 iter
+
+#with 5 time periods
+#100 with 50_000 iter
+#100 with 1_000_000 iter
+#100 with 5_000_000 iter
+
+#with 6 time periods
+#100 with 50_000 iter
+#100 with 1_000_000 iter
+#100 with 5_000_000 iter

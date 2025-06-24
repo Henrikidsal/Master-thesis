@@ -13,7 +13,7 @@ from pyomo.opt import SolverFactory, TerminationCondition
 import time
 
 # Choose the number of time periods wanted:
-Periods = 3
+Periods = 7
 # Sets
 generators = [1, 2, 3]
 time_periods = [x for x in range(1, Periods+1)] # T=3 hours
@@ -27,7 +27,7 @@ gen_data = {
 }
 
 # Demand Parameters
-demand = {1: 160, 2: 500, 3: 400} # Demand for each time period
+demand = {1: 160, 2: 500, 3: 400, 4: 160, 5: 500, 6: 400, 7: 160} # Demand for each time period
 
 # Initial Conditions for time period = 0
 # Only generator 3 is on at t=0, producing 100 MW
@@ -36,7 +36,7 @@ p_initial = {1: 0, 2: 0, 3: 100}
 
 # Number of bits for beta variable
 # With 7 bits, beta can take values from 0 to 127
-num_beta_bits = 7
+num_beta_bits = 8
 
 # Number of bits for slack variables in optimality and feasibility cuts
 # With 10 bits, slack variables can take 1024 discrete values, the range depends on the step length
@@ -142,9 +142,9 @@ def build_master(iteration_data):
     model.D_param = pyo.Param(model.T, initialize=demand) # Demand for each time period
     model.u_init = pyo.Param(model.I, initialize=u_initial) # Initial state of each generator t=0
     model.lambda_logic1 = pyo.Param(initialize=20) # Logic 1 penalty term lambda #20
-    model.lambda_logic2 = pyo.Param(initialize=1)  # Logic 2 penalty term lambda #1
+    model.lambda_logic2 = pyo.Param(initialize=10)  # Logic 2 penalty term lambda #1
     model.lambda_opt_cut = pyo.Param(initialize=5) # Optimality cut penalty term lambda #1
-    model.lambda_feas_cut = pyo.Param(initialize=1) # Feasibility cut penalty term lambda #5
+    model.lambda_feas_cut = pyo.Param(initialize=10) # Feasibility cut penalty term lambda #5
 
     # Variables
     model.u = pyo.Var(model.I, model.T, within=pyo.Binary) # on/off status
@@ -398,6 +398,18 @@ def main():
         # Now the sub problem is solved, a cut is generated and its time to solve the master problem.
         print("\n--- Solving Master Problem ---")
         master_problem = build_master(iteration_data) 
+
+        print(f"  - u variables: {len(master_problem.u)}")
+        print(f"  - zON variables: {len(master_problem.zON)}")
+        print(f"  - zOFF variables: {len(master_problem.zOFF)}")
+        print(f"  - beta variables: {len(master_problem.beta_binary)}")
+        print(f"total number of slack_optimality variables: {len(master_problem.slack_optimality)}")
+        print(f"total number of slack_feasibility variables: {len(master_problem.slack_feasibility)}")
+
+        print(f"logic 1 penatly term count: {len(master_problem.lambda_logic1)}")
+        print(f"logic 2 penatly term count: {len(master_problem.lambda_logic2)}")
+        print(f"optimality cut penalty term count: {len(master_problem.lambda_opt_cut)}")
+        print(f"feasibility cut penalty term count: {len(master_problem.lambda_feas_cut)}")
         
         master_solver.options['NumericFocus'] = 1 # Can activate this if numerical issues arise
         #master_results = master_solver.solve(master_problem, options={'MIPGap': 0.02}, tee=True) 

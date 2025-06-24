@@ -20,14 +20,10 @@ N = 3
 u_prev = {1: 0, 2: 0, 3: 1}
 
 # --- Penalty Weights (Lambdas) ---
-lambda_0 = 30           # Logic 1 
-lambda_logic2 = 20      # Logic 2 
-demand_lambda1 = 730000  # Demand 
-demand_lambda2 = 8600
-ramp_up_lambda1 = 1     # Ramp-Up 
-ramp_up_lambda2 = 0.5
-ramp_down_lambda1 = 1   # Ramp-Down 
-ramp_down_lambda2 = 0.5
+lambda_0 = 3000           # Logic 1 
+lambda_logic2 = 2000      # Logic 2 
+demand_lambda1 = 5e3  # Demand 
+demand_lambda2 = 1e2
 
 # parameters
 P_max = {1:350, 2:200, 3:140}
@@ -97,34 +93,12 @@ for t in range(T):
     h_t.add_term(-D[t+1])
     qubo.add(h_t, -demand_lambda1); qubo.add(h_t.power2(), demand_lambda2)
 
-# --- Constraint 4: Ramp-Up Constraint (Inequality) ---
-# (Print removed)
-# t=1 transition
-for i in range(N):
-    h_up_i0 = BinPol(); h_up_i0.add_term(R_up[i+1]); h_up_i0.add_term(-P_max[i+1], ('u', i, 0)); h_up_i0.add_term(P_max[i+1] * u_prev[i+1])
-    qubo.add(h_up_i0, -ramp_up_lambda1); qubo.add(h_up_i0.power2(), ramp_up_lambda2)
-# t >= 2 transitions
-for t in range(1, T):
-    for i in range(N):
-        h_up_it = BinPol(); h_up_it.add_term(R_up[i+1]); h_up_it.add_term(-P_max[i+1], ('u', i, t)); h_up_it.add_term(P_max[i+1], ('u', i, t-1))
-        qubo.add(h_up_it, -ramp_up_lambda1); qubo.add(h_up_it.power2(), ramp_up_lambda2)
-
-for i in range(N):
-    h_down_i0 = BinPol(); h_down_i0.add_term(R_down[i+1]); h_down_i0.add_term(-P_max[i+1] * u_prev[i+1]); h_down_i0.add_term(P_max[i+1], ('u', i, 0))
-    qubo.add(h_down_i0, -ramp_down_lambda1); qubo.add(h_down_i0.power2(), ramp_down_lambda2)
-
-# t >= 2 transitions
-for t in range(1, T):
-    for i in range(N):
-        h_down_it = BinPol(); h_down_it.add_term(R_down[i+1]); h_down_it.add_term(-P_max[i+1], ('u', i, t-1)); h_down_it.add_term(P_max[i+1], ('u', i, t))
-        qubo.add(h_down_it, -ramp_down_lambda1); qubo.add(h_down_it.power2(), ramp_down_lambda2)
-
 start = timeit.default_timer()
 solver = QUBOSolverCPU(
     optimization_method='parallel_tempering',
-    number_runs=100,
-    number_replicas=100,
-    number_iterations=10000, # Adjusted iterations
+    number_runs=128,
+    number_replicas=128,
+    number_iterations=100000, # Adjusted iterations
     temperature_sampling=True,
     scaling_action=ScalingAction.AUTO_SCALING,
 )

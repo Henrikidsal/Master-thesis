@@ -22,11 +22,11 @@ def main(time_periods, iterations, csv_filepath):
     num_runs = 1
     num_replicas = 128
     num_iter = iterations
-    BETA_BITS = 7
-    num_slack_bits = 8
+    BETA_BITS = 9
+    num_slack_bits = 10
     SCALE_FACTOR = 1
-    lambda1 = 7000
-    lambda2 = 1500
+    lambda1 = 75000
+    lambda2 = 28000
     lambda3 = 50
     lambda4 = 10
 
@@ -49,12 +49,47 @@ def main(time_periods, iterations, csv_filepath):
     if Periods == 3:
         demand = {1: 160, 2: 500, 3: 400}  # 3
         BETA_BITS = 7
+
     elif Periods == 5:
         demand = {1: 160, 2: 500, 3: 400, 4: 160, 5: 500}
         BETA_BITS = 8
+
     elif Periods == 6:
         demand = {1: 160, 2: 500, 3: 400, 4: 160, 5: 500, 6: 400}
         BETA_BITS = 8
+
+    elif Periods == 7:
+        demand = {1: 160, 2: 500, 3: 400, 4: 160, 5: 500, 6: 400, 7: 160}
+        BETA_BITS = 8
+        lambda1 = 90500
+        lambda2 = 39000
+        lambda3 = 40
+        lambda4 = 15
+
+    elif Periods == 8:
+        demand = {1: 160, 2: 500, 3: 400, 4: 160, 5: 500, 6: 400, 7: 160, 8: 500}
+        BETA_BITS = 9
+        lambda1 = 75000*1.05
+        lambda2 = 28000*1.05*1.05*1.05
+        lambda3 = 50
+        lambda4 = 10
+
+    elif Periods == 9:
+        demand = {1: 160, 2: 500, 3: 400, 4: 160, 5: 500, 6: 400, 7: 160, 8: 500, 9: 400}
+        BETA_BITS = 9
+        lambda1 = 75000*1.05*1.05
+        lambda2 = 28000*1.05*1.05
+        lambda3 = 50
+        lambda4 = 10
+
+    elif Periods == 10:
+        demand = {1: 160, 2: 500, 3: 400, 4: 160, 5: 500, 6: 400, 7: 160, 8: 500, 9: 400, 10: 160}
+        BETA_BITS = 9
+        lambda1 = 75000*1.05*1.05*1.05
+        lambda2 = 28000*1.05*1.05*1.05
+        lambda3 = 50
+        lambda4 = 10
+
     else:
         raise ValueError("Invalid number of time periods. Choose between 3 and 7.")
 
@@ -595,6 +630,24 @@ def main(time_periods, iterations, csv_filepath):
             print("\nTerminating: Known optimal solution found for 6-period case.")
             termination_reason = "Known Optimal Solution Found for 6-Period Case"
             break
+        if Periods == 7 and upper_bound == 368.8:
+            print("\nTerminating: Known optimal solution found for 7-period case.")
+            termination_reason = "Known Optimal Solution Found for 7-Period Case"
+            break
+        if Periods == 8 and upper_bound == 448.0:
+            print("\nTerminating: Known optimal solution found for 8-period case.")
+            termination_reason = "Known Optimal Solution Found for 8-Period Case"
+            break
+        if Periods == 9 and upper_bound <= 371.6:
+            print("\nTerminating: Known optimal solution found for 9-period case.")
+            termination_reason = "Known Optimal Solution Found for 9-Period Case"
+            break
+        if Periods == 9 and upper_bound <= 523.5:
+            print("\nTerminating: Known optimal solution found for 10-period case.")
+            termination_reason = "Known Optimal Solution Found for 10-Period Case"
+            break
+
+
         print("\n--- 2. Solving Master Problem (DADK QUBOSolverCPU) ---")
         main_qubo, penalty_qubo_all_terms, master_vss_instance = build_master_fujitsu(iteration_data, num_beta_bits_main)
         master_problem_qubo_for_dadk = main_qubo + penalty_qubo_all_terms

@@ -32,7 +32,7 @@ def run_experiment(periods, iterations, csv_file):
 
 
 if __name__ == '__main__':
-    csv_file = "fujitsu_qubo_results_andreas_modified.csv"
+    csv_file = "fujitsu_qubo_results_5time.csv"
 
     # Remove the results file at the very start of the entire experiment suite
     if os.path.exists(csv_file):
@@ -42,10 +42,10 @@ if __name__ == '__main__':
     # Define all the experiment configurations here
     run_configurations = [
         # (total_runs, iterations, periods)
-        (50, 2_000, 3),
-        (50, 5_000, 3),
-        (50, 5_000, 5),
-        (50, 5_000, 6)
+        #(100, 2_000, 3), lambda1 = 7000, lambda2 = 1500, lambda3 = 50, lambda4 = 10
+        #(100, 5_000, 3), lambda1 = 7000, lambda2 = 1500, lambda3 = 50, lambda4 = 10
+        (100, 2000, 7),
+        (100, 1500, 7)
     ]
 
     # Loop through each configuration

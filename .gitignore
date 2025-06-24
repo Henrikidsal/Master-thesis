@@ -1,4 +1,13 @@
+# Ignore all contents of the tutorial directory
+fujitsu_env/digital-incubation-da-tutorial-b27183753fff/*
+
+# But do not ignore the Software subdirectory
+!fujitsu_env/digital-incubation-da-tutorial-b27183753fff/Software/
+
+# And specifically, do not ignore this file
+!fujitsu_env/digital-incubation-da-tutorial-b27183753fff/Software/dadk-light.tar.bz2
+
+# Your other ignore rules
 fujitsu_env/dadk-310/
-fujitsu_env/digital-incubation-da-tutorial-b27183753fff/
 dadk-310/
 __pycache__/
