@@ -29,7 +29,7 @@ conda activate master-thesis
 
 # Important
 
-These files are not in repo. May need to be added:
+These files are not in the repo. May need to be added:
 
 
 ```bash
